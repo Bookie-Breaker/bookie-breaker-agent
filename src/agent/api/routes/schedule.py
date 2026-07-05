@@ -49,7 +49,12 @@ async def list_schedules(repo: ScheduleRepoDep) -> Envelope[ScheduleListData]:
     return envelope(ScheduleListData(schedules=[_to_data(record) for record in records]))
 
 
-@router.post("/schedule", response_model=Envelope[ScheduleData], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/schedule",
+    response_model=Envelope[ScheduleData],
+    status_code=status.HTTP_201_CREATED,
+    responses={status.HTTP_200_OK: {"model": Envelope[ScheduleData], "description": "Updated the league's schedule."}},
+)
 async def upsert_schedule(
     body: ScheduleRequest,
     repo: ScheduleRepoDep,

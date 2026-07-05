@@ -40,7 +40,12 @@ def _parse_uuid(value: str | None, field: str) -> uuid.UUID | None:
         raise UnprocessableError(f"{field} is not a valid UUID") from exc
 
 
-@router.post("/analysis", response_model=Envelope[AnalysisData], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/analysis",
+    response_model=Envelope[AnalysisData],
+    status_code=status.HTTP_201_CREATED,
+    responses={status.HTTP_200_OK: {"model": Envelope[AnalysisData], "description": "Reused a cached analysis."}},
+)
 async def create_analysis(
     body: AnalysisRequest,
     service: AnalysisServiceDep,
