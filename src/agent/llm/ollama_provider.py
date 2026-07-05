@@ -1,11 +1,13 @@
 """Ollama provider over the shared httpx client (POST /api/chat, ADR-011)."""
 
+import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
-from agent.llm.base import LLMError, LLMResult, ModelTier
+from agent.llm.base import LLMError, LLMResult, LLMStreamChunk, ModelTier
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,59 @@ class OllamaProvider:
             provider=self.provider_name,
             input_tokens=_int_or_none(payload.get("prompt_eval_count")),
             output_tokens=_int_or_none(payload.get("eval_count")),
+        )
+
+    async def stream(
+        self, *, system: str, prompt: str, tier: ModelTier = "quality", max_tokens: int | None = None
+    ) -> AsyncIterator[LLMStreamChunk]:
+        model = self.model_for(tier)
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": True,
+        }
+        if max_tokens is not None:
+            body["options"] = {"num_predict": max_tokens}
+        deltas: list[str] = []
+        final_line: dict[str, Any] = {}
+        try:
+            async with self._client.stream(
+                "POST", f"{self._base_url}/api/chat", json=body, timeout=self._timeout
+            ) as response:
+                if response.status_code != 200:
+                    detail = (await response.aread()).decode(errors="replace")[:200]
+                    raise LLMError(f"Ollama returned {response.status_code}: {detail}")
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except ValueError as exc:
+                        raise LLMError("Ollama returned a malformed chat stream") from exc
+                    delta = str(payload.get("message", {}).get("content") or "")
+                    if delta:
+                        deltas.append(delta)
+                        yield LLMStreamChunk(text=delta)
+                    if payload.get("done"):
+                        final_line = payload
+                        break
+        except httpx.HTTPError as exc:
+            raise LLMError(f"Ollama is unavailable: {exc}") from exc
+        text = "".join(deltas)
+        if not text:
+            raise LLMError("Ollama returned no text content")
+        yield LLMStreamChunk(
+            text="",
+            final=LLMResult(
+                text=text,
+                model=str(final_line.get("model", model)),
+                provider=self.provider_name,
+                input_tokens=_int_or_none(final_line.get("prompt_eval_count")),
+                output_tokens=_int_or_none(final_line.get("eval_count")),
+            ),
         )
 
     async def is_healthy(self) -> bool:

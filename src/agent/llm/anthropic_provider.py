@@ -5,10 +5,11 @@ retry wrapper is needed on this path.
 """
 
 import logging
+from collections.abc import AsyncIterator
 
 import anthropic
 
-from agent.llm.base import LLMError, LLMResult, ModelTier
+from agent.llm.base import LLMError, LLMResult, LLMStreamChunk, ModelTier
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,39 @@ class AnthropicProvider:
             provider=self.provider_name,
             input_tokens=message.usage.input_tokens,
             output_tokens=message.usage.output_tokens,
+        )
+
+    async def stream(
+        self, *, system: str, prompt: str, tier: ModelTier = "quality", max_tokens: int | None = None
+    ) -> AsyncIterator[LLMStreamChunk]:
+        if not self._api_key:
+            raise LLMError("ANTHROPIC_API_KEY is not configured")
+        model = self.model_for(tier)
+        try:
+            async with self._client.messages.stream(
+                model=model,
+                max_tokens=max_tokens or self._max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                async for delta in stream.text_stream:
+                    if delta:
+                        yield LLMStreamChunk(text=delta)
+                message = await stream.get_final_message()
+        except anthropic.APIError as exc:
+            raise LLMError(f"Anthropic API error: {exc}") from exc
+        text = "".join(block.text for block in message.content if block.type == "text")
+        if not text:
+            raise LLMError("Anthropic returned no text content")
+        yield LLMStreamChunk(
+            text="",
+            final=LLMResult(
+                text=text,
+                model=message.model,
+                provider=self.provider_name,
+                input_tokens=message.usage.input_tokens,
+                output_tokens=message.usage.output_tokens,
+            ),
         )
 
     async def is_healthy(self) -> bool:
