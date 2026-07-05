@@ -5,12 +5,13 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Row, and_, insert, literal, or_, select, tuple_, update
+from sqlalchemy import Row, and_, func, insert, literal, literal_column, or_, select, tuple_, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from agent.api.pagination import Cursor
-from agent.db.tables import edges, pipeline_runs
+from agent.db.tables import analyses, edge_alerts, edges, pipeline_runs, pipeline_schedules
 
 ACTIVE_RUN_STATUSES = ("QUEUED", "RUNNING")
 
@@ -284,6 +285,33 @@ class EdgeRepository:
         async with self._engine.begin() as conn:
             await conn.execute(update(edges).where(edges.c.id == edge_id).values(paper_bet_id=paper_bet_id))
 
+    async def leagues_for_game_externals(self, game_external_ids: list[str]) -> list[str]:
+        """Distinct leagues that have fresh edges on any of the given games."""
+        if not game_external_ids:
+            return []
+        stmt = (
+            select(edges.c.league)
+            .where(and_(edges.c.game_external_id.in_(game_external_ids), edges.c.is_stale.is_(False)))
+            .distinct()
+        )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        return [str(row.league) for row in rows]
+
+    async def latest_analysis_summary(self, edge_id: uuid.UUID) -> "AnalysisSummary | None":
+        """Newest analysis attached to an edge (edge-detail enrichment)."""
+        stmt = (
+            select(analyses.c.id, analyses.c.title, analyses.c.created_at)
+            .where(analyses.c.edge_id == edge_id)
+            .order_by(analyses.c.created_at.desc())
+            .limit(1)
+        )
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        return AnalysisSummary(id=row.id, title=row.title, created_at=row.created_at)
+
     async def mark_stale_by_game_external(self, game_external_id: str) -> int:
         """Mark a game's fresh edges stale (line moved or game completed)."""
         stmt = (
@@ -302,6 +330,239 @@ class EdgeRepository:
             return True
         except Exception:  # noqa: BLE001 - any DB failure means unhealthy
             return False
+
+
+@dataclass(frozen=True)
+class AnalysisSummary:
+    id: uuid.UUID
+    title: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class AnalysisRecord:
+    id: uuid.UUID
+    analysis_type: str
+    game_id: uuid.UUID | None
+    edge_id: uuid.UUID | None
+    title: str
+    content: str
+    question: str | None
+    model_used: str
+    provider: str
+    input_summary: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    created_at: datetime
+
+
+def _analysis_from_row(row: Row[Any]) -> AnalysisRecord:
+    return AnalysisRecord(
+        id=row.id,
+        analysis_type=row.analysis_type,
+        game_id=row.game_id,
+        edge_id=row.edge_id,
+        title=row.title,
+        content=row.content,
+        question=row.question,
+        model_used=row.model_used,
+        provider=row.provider,
+        input_summary=row.input_summary,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        created_at=row.created_at,
+    )
+
+
+class AnalysisRepository:
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def insert(self, values: dict[str, Any]) -> AnalysisRecord:
+        stmt = insert(analyses).values(**values).returning(analyses)
+        async with self._engine.begin() as conn:
+            row = (await conn.execute(stmt)).one()
+        return _analysis_from_row(row)
+
+    async def get(self, analysis_id: uuid.UUID) -> AnalysisRecord | None:
+        stmt = select(analyses).where(analyses.c.id == analysis_id)
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(stmt)).one_or_none()
+        return _analysis_from_row(row) if row is not None else None
+
+
+@dataclass(frozen=True)
+class EdgeAlertRecord:
+    id: uuid.UUID
+    edge_id: uuid.UUID
+    channel: str
+    priority: str
+    message: str
+    payload: dict[str, Any]
+    delivered_at: datetime
+    acknowledged_at: datetime | None
+
+
+def _alert_from_row(row: Row[Any]) -> EdgeAlertRecord:
+    return EdgeAlertRecord(
+        id=row.id,
+        edge_id=row.edge_id,
+        channel=row.channel,
+        priority=row.priority,
+        message=row.message,
+        payload=dict(row.payload),
+        delivered_at=row.delivered_at,
+        acknowledged_at=row.acknowledged_at,
+    )
+
+
+class EdgeAlertRepository:
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def insert(self, values: dict[str, Any]) -> EdgeAlertRecord:
+        stmt = insert(edge_alerts).values(**values).returning(edge_alerts)
+        async with self._engine.begin() as conn:
+            row = (await conn.execute(stmt)).one()
+        return _alert_from_row(row)
+
+    async def list_alerts(
+        self,
+        priority: str | None = None,
+        acknowledged: bool | None = None,
+        limit: int = 50,
+        cursor: Cursor | None = None,
+    ) -> tuple[list[EdgeAlertRecord], bool]:
+        """Keyset-paginated listing ordered by (delivered_at DESC, id DESC).
+
+        Reuses the edges cursor shape; its timestamp field carries
+        delivered_at here.
+        """
+        stmt = select(edge_alerts).order_by(edge_alerts.c.delivered_at.desc(), edge_alerts.c.id.desc()).limit(limit + 1)
+        if priority is not None:
+            stmt = stmt.where(edge_alerts.c.priority == priority)
+        if acknowledged is not None:
+            ack = edge_alerts.c.acknowledged_at
+            stmt = stmt.where(ack.is_not(None) if acknowledged else ack.is_(None))
+        if cursor is not None:
+            stmt = stmt.where(
+                tuple_(edge_alerts.c.delivered_at, edge_alerts.c.id)
+                < tuple_(literal(cursor.detected_at), literal(cursor.id))
+            )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        has_more = len(rows) > limit
+        return [_alert_from_row(row) for row in rows[:limit]], has_more
+
+    async def acknowledge(self, alert_id: uuid.UUID) -> EdgeAlertRecord | None:
+        """Set acknowledged_at once; re-acknowledging is a no-op (idempotent)."""
+        stmt = (
+            update(edge_alerts)
+            .where(and_(edge_alerts.c.id == alert_id, edge_alerts.c.acknowledged_at.is_(None)))
+            .values(acknowledged_at=datetime.now(tz=UTC))
+            .returning(edge_alerts)
+        )
+        async with self._engine.begin() as conn:
+            row = (await conn.execute(stmt)).one_or_none()
+            if row is not None:
+                return _alert_from_row(row)
+            # Already acknowledged (idempotent success) or missing (None).
+            existing = (await conn.execute(select(edge_alerts).where(edge_alerts.c.id == alert_id))).one_or_none()
+        return _alert_from_row(existing) if existing is not None else None
+
+
+@dataclass(frozen=True)
+class ScheduleRecord:
+    id: uuid.UUID
+    league: str
+    cron_expression: str
+    timezone: str
+    description: str | None
+    enabled: bool
+    simulation_config: dict[str, Any] | None
+    auto_bet: bool
+    min_edge_threshold: float
+    last_run_at: datetime | None
+    next_run_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+def _schedule_from_row(row: Row[Any]) -> ScheduleRecord:
+    return ScheduleRecord(
+        id=row.id,
+        league=row.league,
+        cron_expression=row.cron_expression,
+        timezone=row.timezone,
+        description=row.description,
+        enabled=row.enabled,
+        simulation_config=dict(row.simulation_config) if row.simulation_config is not None else None,
+        auto_bet=row.auto_bet,
+        min_edge_threshold=float(row.min_edge_threshold),
+        last_run_at=row.last_run_at,
+        next_run_at=row.next_run_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+class ScheduleRepository:
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def upsert_for_league(self, values: dict[str, Any]) -> tuple[ScheduleRecord, bool]:
+        """Insert or update the league's schedule. Returns (record, created)."""
+        insert_stmt = pg_insert(pipeline_schedules).values(**values)
+        update_values = {k: v for k, v in values.items() if k != "league"}
+        update_values["updated_at"] = datetime.now(tz=UTC)
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[pipeline_schedules.c.league], set_=update_values
+        ).returning(pipeline_schedules, literal_column("(xmax = 0)").label("was_inserted"))
+        async with self._engine.begin() as conn:
+            row = (await conn.execute(stmt)).one()
+        return _schedule_from_row(row), bool(row.was_inserted)
+
+    async def list_all(self) -> list[ScheduleRecord]:
+        stmt = select(pipeline_schedules).order_by(pipeline_schedules.c.league)
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        return [_schedule_from_row(row) for row in rows]
+
+    async def list_enabled(self) -> list[ScheduleRecord]:
+        stmt = select(pipeline_schedules).where(pipeline_schedules.c.enabled.is_(True))
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        return [_schedule_from_row(row) for row in rows]
+
+    async def has_enabled_for_league(self, league: str) -> bool:
+        stmt = select(pipeline_schedules.c.id).where(
+            and_(pipeline_schedules.c.league == league, pipeline_schedules.c.enabled.is_(True))
+        )
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(stmt)).first()
+        return row is not None
+
+    async def mark_ran(self, schedule_id: uuid.UUID, last_run_at: datetime, next_run_at: datetime) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(pipeline_schedules)
+                .where(pipeline_schedules.c.id == schedule_id)
+                .values(last_run_at=last_run_at, next_run_at=next_run_at, updated_at=datetime.now(tz=UTC))
+            )
+
+    async def set_next_run(self, schedule_id: uuid.UUID, next_run_at: datetime | None) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                update(pipeline_schedules)
+                .where(pipeline_schedules.c.id == schedule_id)
+                .values(next_run_at=next_run_at, updated_at=datetime.now(tz=UTC))
+            )
+
+    async def min_next_run(self) -> datetime | None:
+        stmt = select(func.min(pipeline_schedules.c.next_run_at)).where(pipeline_schedules.c.enabled.is_(True))
+        async with self._engine.connect() as conn:
+            value = (await conn.execute(stmt)).scalar()
+        return value if isinstance(value, datetime) else None
 
 
 def utc_now() -> datetime:

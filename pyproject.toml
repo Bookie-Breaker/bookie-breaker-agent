@@ -1,7 +1,9 @@
 [project]
 dependencies = [
   "alembic>=1.14",
+  "anthropic>=0.60",
   "asyncpg>=0.30",
+  "croniter>=6.0",
   "fastapi>=0.115",
   "httpx>=0.28",
   "opentelemetry-exporter-otlp-proto-grpc>=1.29",
@@ -31,6 +33,7 @@ dev = [
   "pyyaml",
   "respx",
   "testcontainers[postgres,redis]",
+  "types-croniter",
   "types-pyyaml",
 ]
 

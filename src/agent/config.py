@@ -28,6 +28,25 @@ class Settings(BaseSettings):
     devig_method: str = "multiplicative"  # multiplicative | additive | shin
     pipeline_concurrency: int = 4  # bounded per-game concurrency inside a run
 
+    llm_provider: str = "anthropic"  # anthropic | ollama (ADR-011: config-only switch)
+    anthropic_api_key: str | None = None
+    llm_base_url: str | None = None  # None -> provider default (api.anthropic.com / http://ollama:11434)
+    llm_model: str = "claude-opus-4-8"  # quality tier: edge breakdowns, previews, reviews
+    llm_model_cheap: str = ""  # cheap tier; empty -> provider default (claude-haiku-4-5 / llm_model)
+    llm_max_tokens: int = 2048
+    llm_timeout_seconds: float = 60.0
+    analysis_cache_ttl_seconds: int = 3600  # agent:analysis:{type}:{scope} per redis-schemas.md
+
+    schedule_misfire_grace_seconds: int = 300  # missed cron fires older than this roll forward unrun
+    daily_summary_enabled: bool = True
+    daily_summary_cron: str = "0 12 * * *"
+    daily_summary_timezone: str = "UTC"
+    event_reruns_enabled: bool = True
+    rerun_debounce_seconds: float = 120.0  # quiet period after the last triggering event
+    rerun_cooldown_seconds: float = 600.0  # minimum spacing between EVENT runs per league
+    alert_llm_descriptions: bool = True
+    alert_llm_max_per_run: int = 10  # LLM-written alert descriptions per pipeline run (cost cap)
+
     otel_exporter_otlp_endpoint: str | None = None
     otel_service_name: str = "agent"
 
