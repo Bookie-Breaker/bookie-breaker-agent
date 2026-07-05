@@ -1,4 +1,10 @@
-"""Shared envelope-unwrapping HTTP client base."""
+"""Shared envelope-unwrapping HTTP client base.
+
+GETs are idempotent and retried on transient failures (network, 5xx,
+timeouts). POSTs are single-shot unless the caller opts in with
+retriable=True — safe only when the upstream endpoint is idempotent
+(e.g. simulation runs and prediction batches keyed by game).
+"""
 
 from typing import Any
 
@@ -10,6 +16,7 @@ from agent.api.errors import (
     NotFoundError,
     UnprocessableError,
 )
+from agent.clients.retry import with_retries
 
 
 class ServiceClient:
@@ -23,8 +30,12 @@ class ServiceClient:
         """GET an enveloped endpoint and return its data payload.
 
         Returns dict or list depending on the endpoint. Raises NotFoundError
-        on 404, DependencyError/DependencyTimeoutError on upstream failures.
+        on 404, DependencyError/DependencyTimeoutError on upstream failures
+        (after transparent retries).
         """
+        return await with_retries(lambda: self._get_once(path, resource, params))
+
+    async def _get_once(self, path: str, resource: str, params: dict[str, Any] | None) -> Any:
         url = f"{self._base_url}{path}"
         try:
             response = await self._client.get(url, params=params)
@@ -47,13 +58,27 @@ class ServiceClient:
         resource: str,
         json: dict[str, Any],
         headers: dict[str, str] | None = None,
+        retriable: bool = False,
     ) -> Any:
         """POST to an enveloped endpoint and return its data payload.
 
         Accepts 200/201/202. Raises NotFoundError on 404, UnprocessableError
         on 422 (with the upstream message when available), and
         DependencyError/DependencyTimeoutError on other upstream failures.
+        retriable=True retries transient failures — only for idempotent
+        upstream endpoints; bet placement must stay single-shot.
         """
+        if retriable:
+            return await with_retries(lambda: self._post_once(path, resource, json, headers))
+        return await self._post_once(path, resource, json, headers)
+
+    async def _post_once(
+        self,
+        path: str,
+        resource: str,
+        json: dict[str, Any],
+        headers: dict[str, str] | None,
+    ) -> Any:
         url = f"{self._base_url}{path}"
         try:
             response = await self._client.post(url, json=json, headers=headers)

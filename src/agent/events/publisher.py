@@ -30,8 +30,8 @@ def edge_priority(confidence: float | None) -> str:
     return "LOW"
 
 
-async def publish_edge_detected(redis_client: "aioredis.Redis", edge: EdgeRecord) -> None:
-    payload = {
+def edge_detected_payload(edge: EdgeRecord, description: str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
         "event": "edge.detected",
         "timestamp": _utc_now_iso(),
         "edge_id": str(edge.id),
@@ -51,6 +51,15 @@ async def publish_edge_detected(redis_client: "aioredis.Redis", edge: EdgeRecord
         "game_start": edge.expires_at.isoformat().replace("+00:00", "Z"),
         "priority": edge_priority(edge.confidence),
     }
+    if description is not None:
+        payload["description"] = description
+    return payload
+
+
+async def publish_edge_detected(
+    redis_client: "aioredis.Redis", edge: EdgeRecord, description: str | None = None
+) -> None:
+    payload = edge_detected_payload(edge, description=description)
     try:
         await redis_client.publish(EDGE_DETECTED_CHANNEL, json.dumps(payload))
     except Exception:  # noqa: BLE001 - pub/sub is best-effort by design

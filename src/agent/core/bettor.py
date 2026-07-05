@@ -101,6 +101,7 @@ class AutoBettor:
         open_exposure_units: float,
         auto_bet: bool,
         now: datetime,
+        min_edge_threshold: float | None = None,
     ) -> BetPlan:
         """Size every candidate and select the subset to bet.
 
@@ -119,6 +120,8 @@ class AutoBettor:
             return BetPlan(stakes=stakes, kelly=kelly, to_bet=[])
 
         bettable = [c for c in candidates if self.should_bet(c, now)]
+        if min_edge_threshold is not None:
+            bettable = [c for c in bettable if c.edge_percentage >= min_edge_threshold]
         if not bettable:
             return BetPlan(stakes=stakes, kelly=kelly, to_bet=[])
 

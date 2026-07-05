@@ -31,6 +31,8 @@ LINES_URL = "http://lines.test"
 SIM_URL = "http://sim.test"
 PREDICT_URL = "http://predict.test"
 EMULATOR_URL = "http://emulator.test"
+ANTHROPIC_URL = "http://anthropic.test"
+OLLAMA_URL = "http://ollama.test"
 
 INIT_SQL = """
 CREATE SCHEMA IF NOT EXISTS agent;
@@ -90,6 +92,9 @@ def client(migrated_database_url: str, redis_url: str) -> Iterator[TestClient]:
         simulation_engine_url=SIM_URL,
         prediction_engine_url=PREDICT_URL,
         bookie_emulator_url=EMULATOR_URL,
+        llm_provider="anthropic",
+        anthropic_api_key="test-key",
+        llm_base_url=ANTHROPIC_URL,
     )
     app = create_app(settings)
     with TestClient(app) as test_client:
@@ -173,6 +178,32 @@ def error_enveloped(code: str, message: str) -> dict[str, Any]:
         "error": {"code": code, "message": message, "details": {}},
         "meta": {"timestamp": "2026-07-04T12:00:00Z", "request_id": "req-test"},
     }
+
+
+def anthropic_message_payload(text: str, model: str = "claude-opus-4-8") -> dict[str, Any]:
+    """Minimal valid Anthropic Messages API response (SDK-parseable)."""
+    return {
+        "id": "msg_test_01",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 900, "output_tokens": 350},
+    }
+
+
+def mock_anthropic_messages(router: respx.MockRouter, text: str = "## Summary\n\nTest analysis.") -> Any:
+    return router.post(f"{ANTHROPIC_URL}/v1/messages").mock(
+        return_value=Response(200, json=anthropic_message_payload(text))
+    )
+
+
+def mock_anthropic_health(router: respx.MockRouter) -> Any:
+    return router.get(f"{ANTHROPIC_URL}/v1/models").mock(
+        return_value=Response(200, json={"data": [], "has_more": False, "first_id": None, "last_id": None})
+    )
 
 
 def game_payload(game_id: str, scheduled_start: str | None = None) -> dict[str, Any]:

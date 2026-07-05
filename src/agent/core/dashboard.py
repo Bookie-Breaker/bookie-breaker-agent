@@ -2,8 +2,8 @@
 
 Cache-aside via ``agent:dashboard:{league}`` (5 minute TTL per
 redis-schemas.md). Emulator-backed sections degrade to null when the
-bookie-emulator is unavailable; next_scheduled_run stays null until Phase 4
-cron scheduling.
+bookie-emulator is unavailable; next_scheduled_run reflects the earliest
+enabled pipeline schedule.
 """
 
 import asyncio
@@ -24,7 +24,7 @@ from agent.api.schemas import (
     TopEdge,
 )
 from agent.clients.emulator import EmulatorClient
-from agent.db.repository import EdgeRepository, PipelineRunRepository
+from agent.db.repository import EdgeRepository, PipelineRunRepository, ScheduleRepository
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,14 @@ class DashboardService:
         emulator: EmulatorClient,
         redis_client: "aioredis.Redis",
         ttl_seconds: int = 300,
+        schedule_repo: ScheduleRepository | None = None,
     ) -> None:
         self._edge_repo = edge_repo
         self._run_repo = run_repo
         self._emulator = emulator
         self._redis = redis_client
         self._ttl = ttl_seconds
+        self._schedule_repo = schedule_repo
 
     async def get_dashboard(self, league: str | None = None) -> DashboardData:
         key = cache_key(league)
@@ -132,8 +134,9 @@ class DashboardService:
 
     async def _pipeline_status(self, league: str | None) -> PipelineStatus:
         run = await self._run_repo.last_run(league)
+        next_scheduled = await self._next_scheduled_run()
         if run is None:
-            return PipelineStatus(last_run=None)
+            return PipelineStatus(last_run=None, next_scheduled_run=next_scheduled)
         return PipelineStatus(
             last_run=LastRun(
                 pipeline_run_id=str(run.id),
@@ -142,8 +145,19 @@ class DashboardService:
                 games_processed=run.games_processed,
                 edges_found=run.edges_found,
                 bets_placed=run.bets_placed,
-            )
+            ),
+            next_scheduled_run=next_scheduled,
         )
+
+    async def _next_scheduled_run(self) -> str | None:
+        if self._schedule_repo is None:
+            return None
+        try:
+            value = await self._schedule_repo.min_next_run()
+        except Exception:  # noqa: BLE001 - dashboard must not fail on schedule reads
+            logger.warning("next_scheduled_run unavailable for dashboard", exc_info=True)
+            return None
+        return value.isoformat().replace("+00:00", "Z") if value else None
 
     async def _open_bets(self) -> OpenBets | None:
         try:

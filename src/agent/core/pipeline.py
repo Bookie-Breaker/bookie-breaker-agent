@@ -22,6 +22,7 @@ from agent.clients.prediction import PredictionClient
 from agent.clients.reconcile import GameReconciler
 from agent.clients.simulation import SimulationClient
 from agent.clients.statistics import Game, StatisticsClient
+from agent.core.alerts import AlertService
 from agent.core.bettor import AutoBettor, candidate_key
 from agent.core.edge_detector import EdgeCandidate, EdgeDetector
 from agent.db.repository import (
@@ -31,7 +32,7 @@ from agent.db.repository import (
     PipelineRunRecord,
     PipelineRunRepository,
 )
-from agent.events.publisher import publish_edge_detected, publish_prediction_completed
+from agent.events.publisher import publish_prediction_completed
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class RunParams:
     force_refresh: bool = False
     auto_bet: bool = True
     simulation_config: dict[str, Any] | None = None
+    # Scheduled runs only auto-bet edges at or above this percentage;
+    # None keeps the detector's own actionability gating (Phase 3 behavior).
+    min_edge_threshold: float | None = None
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -52,6 +56,7 @@ class RunParams:
             "force_refresh": self.force_refresh,
             "auto_bet": self.auto_bet,
             "simulation_config": self.simulation_config,
+            "min_edge_threshold": self.min_edge_threshold,
         }
 
 
@@ -84,6 +89,7 @@ class PipelineRunner:
         reconciler: GameReconciler,
         detector: EdgeDetector,
         bettor: AutoBettor,
+        alerts: AlertService,
         redis_client: "aioredis.Redis",
         concurrency: int = 4,
     ) -> None:
@@ -96,15 +102,18 @@ class PipelineRunner:
         self._reconciler = reconciler
         self._detector = detector
         self._bettor = bettor
+        self._alerts = alerts
         self._redis = redis_client
         self._concurrency = concurrency
         self._tasks: set[asyncio.Task[None]] = set()
 
-    async def start_run(self, params: RunParams) -> tuple[PipelineRunRecord, int]:
+    async def start_run(self, params: RunParams, trigger: str = "MANUAL") -> tuple[PipelineRunRecord, int]:
         """Create a RUNNING pipeline row and launch the background execution.
 
-        Raises DuplicateResourceError (409) when a run for the same league
-        is already active; details carry the running pipeline_run_id.
+        trigger is MANUAL (API), SCHEDULED (cron scheduler), or EVENT
+        (event-triggered re-run). Raises DuplicateResourceError (409) when a
+        run for the same league is already active; details carry the running
+        pipeline_run_id.
         """
         active = await self._run_repo.get_active_for_league(params.league)
         if active is not None:
@@ -115,7 +124,7 @@ class PipelineRunner:
 
         games = await self._resolve_games(params)
         try:
-            run = await self._run_repo.create_running(params.league, "MANUAL", params.as_json())
+            run = await self._run_repo.create_running(params.league, trigger, params.as_json())
         except DuplicateRunningRunError as exc:
             active = await self._run_repo.get_active_for_league(params.league)
             raise DuplicateResourceError(
@@ -167,7 +176,14 @@ class PipelineRunner:
         await self._run_repo.update_progress(run_id, steps=steps, games_processed=games_processed)
 
         bankroll_units, open_exposure_units = await self._bettor.fetch_bankroll()
-        plan = self._bettor.plan(candidates, bankroll_units, open_exposure_units, params.auto_bet, now)
+        plan = self._bettor.plan(
+            candidates,
+            bankroll_units,
+            open_exposure_units,
+            params.auto_bet,
+            now,
+            min_edge_threshold=params.min_edge_threshold,
+        )
 
         records: dict[str, EdgeRecord] = {}
         actionable: list[EdgeRecord] = []
@@ -178,8 +194,7 @@ class PipelineRunner:
             if candidate.meets_threshold:
                 actionable.append(record)
 
-        for record in actionable:
-            await publish_edge_detected(self._redis, record)
+        await self._alerts.dispatch_all(actionable)
 
         bets_placed = 0
         bet_errors: dict[str, str] = {}

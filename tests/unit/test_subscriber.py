@@ -77,6 +77,47 @@ class TestOtherChannels:
         assert "agent:dashboard:all" in redis.store
 
 
+class FakeRerun:
+    def __init__(self) -> None:
+        self.requested: list[str] = []
+
+    def request(self, league: str) -> None:
+        self.requested.append(league)
+
+
+class TestEventReruns:
+    async def test_lines_updated_requests_rerun_for_payload_league(self) -> None:
+        rerun = FakeRerun()
+        subscriber = EventSubscriber(FakeRedis(), FakeEdgeRepo(), rerun=rerun)  # type: ignore[arg-type]
+        payload = {"event": "lines.updated", "league": "NBA", "game_ids": ["ext-1"]}
+        await subscriber.handle_message("events:lines.updated", json.dumps(payload))
+        assert rerun.requested == ["NBA"]
+
+    async def test_lines_updated_resolves_leagues_from_edges_when_missing(self) -> None:
+        from tests.unit.factories import make_edge_record
+
+        rerun = FakeRerun()
+        repo = FakeEdgeRepo(active=[make_edge_record(game_external_id="ext-1", league="MLB")])
+        subscriber = EventSubscriber(FakeRedis(), repo, rerun=rerun)  # type: ignore[arg-type]
+        payload = {"event": "lines.updated", "game_ids": ["ext-1"]}
+        await subscriber.handle_message("events:lines.updated", json.dumps(payload))
+        assert rerun.requested == ["MLB"]
+
+    async def test_stats_updated_requests_rerun(self) -> None:
+        rerun = FakeRerun()
+        subscriber = EventSubscriber(FakeRedis(), FakeEdgeRepo(), rerun=rerun)  # type: ignore[arg-type]
+        payload = {"event": "stats.updated", "league": "NBA"}
+        await subscriber.handle_message("events:stats.updated", json.dumps(payload))
+        assert rerun.requested == ["NBA"]
+
+    async def test_game_completed_never_reruns(self) -> None:
+        rerun = FakeRerun()
+        subscriber = EventSubscriber(FakeRedis(), FakeEdgeRepo(), rerun=rerun)  # type: ignore[arg-type]
+        payload = {"event": "game.completed", "game_external_id": "ext-1", "league": "NBA"}
+        await subscriber.handle_message("events:game.completed", json.dumps(payload))
+        assert rerun.requested == []
+
+
 class TestRobustness:
     async def test_malformed_json_swallowed(self) -> None:
         subscriber = make_subscriber()

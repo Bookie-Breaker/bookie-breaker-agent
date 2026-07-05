@@ -23,7 +23,7 @@ def poll_run(client, run_id: str, timeout: float = 30.0) -> dict:
 
 
 class TestPipelineRun:
-    def test_run_detects_edges_and_places_bets(self, client, upstream, redis_url) -> None:
+    def test_run_detects_edges_and_places_bets(self, client, upstream, redis_url, migrated_database_url) -> None:
         game_id = str(uuid.uuid4())
         game_external_id = f"odds-{uuid.uuid4().hex[:12]}"
         routes = mock_happy_path(upstream, game_id, game_external_id)
@@ -119,10 +119,24 @@ class TestPipelineRun:
         # the event expresses the edge as a probability fraction
         assert 0 < moneyline_event["edge_percentage"] < 1
         assert moneyline_event["game_start"]
+        # Phase 4: every event carries a natural-language description
+        # (template fallback here — the LLM endpoint is unmocked)
+        for event in edge_events:
+            assert "% edge on" in event["description"]
         assert len(batch_events) == 1
         assert batch_events[0]["game_ids"] == [game_id]
         assert batch_events[0]["predictions_count"] == 3
         assert batch_events[0]["edges_found"] == 3
+
+        # Phase 4: alert deliveries persisted to agent.edge_alerts
+        alert_rows = execute_sql(
+            migrated_database_url,
+            "SELECT ea.priority, ea.message FROM agent.edge_alerts ea "
+            "JOIN agent.edges e ON e.id = ea.edge_id WHERE e.game_id = $1",
+            uuid.UUID(game_id),
+        )
+        assert len(alert_rows) == 3
+        assert all("% edge on" in row["message"] for row in alert_rows)
 
     def test_duplicate_league_run_conflicts(self, client, migrated_database_url) -> None:
         rows = execute_sql(

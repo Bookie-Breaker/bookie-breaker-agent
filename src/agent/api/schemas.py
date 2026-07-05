@@ -1,6 +1,6 @@
-"""Request/response models mirroring api-contracts/agent-api.md (Phase 3)."""
+"""Request/response models mirroring api-contracts/agent-api.md."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,77 @@ class PipelineRunRequest(BaseModel):
     force_refresh: bool = False
     auto_bet: bool = True
     simulation_config: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Analysis
+
+
+class AnalysisRequest(BaseModel):
+    analysis_type: Literal["GAME_PREVIEW", "EDGE_BREAKDOWN", "PERFORMANCE_REVIEW"]
+    game_id: str | None = None
+    edge_id: str | None = None
+    question: str | None = Field(default=None, max_length=2000)
+
+
+class AnalysisData(BaseModel):
+    id: str
+    analysis_type: str
+    game_id: str | None
+    edge_id: str | None
+    title: str
+    content: str
+    model_used: str
+    input_summary: str | None
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+
+
+class AlertData(BaseModel):
+    id: str
+    edge_id: str
+    channel: str
+    priority: str
+    message: str
+    payload: dict[str, Any]
+    delivered_at: str
+    acknowledged_at: str | None
+
+
+# ---------------------------------------------------------------------------
+# Schedule
+
+
+class ScheduleRequest(BaseModel):
+    league: str
+    cron_expression: str
+    timezone: str = "UTC"
+    description: str | None = None
+    enabled: bool = True
+    simulation_config: dict[str, Any] | None = None
+    auto_bet: bool = True
+    min_edge_threshold: float = Field(default=3.0, ge=0.0)
+
+
+class ScheduleData(BaseModel):
+    id: str
+    league: str
+    cron_expression: str
+    timezone: str
+    description: str | None
+    enabled: bool
+    last_run_at: str | None
+    next_run_at: str | None
+    simulation_config: dict[str, Any] | None
+    auto_bet: bool
+    min_edge_threshold: float
+
+
+class ScheduleListData(BaseModel):
+    schedules: list[ScheduleData]
 
 
 class PipelineRunAcceptedData(BaseModel):
@@ -104,6 +175,12 @@ class EdgePaperBet(BaseModel):
     placed_at: str
 
 
+class EdgeAnalysisSummary(BaseModel):
+    id: str
+    title: str
+    created_at: str
+
+
 class EdgeDetailData(BaseModel):
     id: str
     game_id: str
@@ -129,7 +206,7 @@ class EdgeDetailData(BaseModel):
     prediction: EdgePrediction | None
     betting_line: EdgeBettingLine | None
     paper_bet: EdgePaperBet | None
-    analysis: None = None  # Phase 4: LLM analysis
+    analysis: EdgeAnalysisSummary | None = None  # newest LLM analysis for this edge
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +301,7 @@ class LastRun(BaseModel):
 
 class PipelineStatus(BaseModel):
     last_run: LastRun | None
-    next_scheduled_run: None = None  # Phase 4: cron scheduling
+    next_scheduled_run: str | None = None  # earliest enabled schedule's next fire
 
 
 class OpenBets(BaseModel):
@@ -247,7 +324,7 @@ class DashboardData(BaseModel):
 class HealthPipeline(BaseModel):
     last_run_status: str | None
     last_run_at: str | None
-    next_scheduled_run: None = None  # Phase 4: cron scheduling
+    next_scheduled_run: str | None = None  # earliest enabled schedule's next fire
 
 
 class HealthData(BaseModel):
