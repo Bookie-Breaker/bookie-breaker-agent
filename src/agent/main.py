@@ -111,12 +111,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         },
         license_info={"name": "MIT", "url": "https://opensource.org/licenses/MIT"},
         servers=[{"url": "http://localhost:8006", "description": "Local development"}],
+        # alphabetical by name: the docs repo's Spectral ruleset requires it
         openapi_tags=[
-            {"name": "pipeline", "description": "Trigger and inspect prediction pipeline runs."},
-            {"name": "edges", "description": "Detected positive-EV edges against de-vigged market prices."},
-            {"name": "slate", "description": "A date's games with prediction summaries and active edges."},
             {"name": "dashboard", "description": "Aggregated edges, performance, and pipeline status."},
+            {"name": "edges", "description": "Detected positive-EV edges against de-vigged market prices."},
             {"name": "health", "description": "Service health and downstream dependency status."},
+            {"name": "pipeline", "description": "Trigger and inspect prediction pipeline runs."},
+            {"name": "slate", "description": "A date's games with prediction summaries and active edges."},
         ],
         lifespan=lifespan,
     )
