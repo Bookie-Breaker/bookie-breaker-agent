@@ -1,16 +1,27 @@
-"""LLM analysis endpoints per api-contracts/agent-api.md (Phase 4)."""
+"""LLM analysis endpoints per api-contracts/agent-api.md (Phase 4 + 5).
 
+The streaming variant emits SSE events: `chunk` ({"text": delta})
+repeated, then `done` carrying the persisted AnalysisData envelope with
+meta.cached, or `error` on a mid-stream provider failure. Pre-stream
+failures (validation, unknown ids, degraded LLM) return the standard
+JSON error envelope — the response never switches to SSE.
+"""
+
+import json
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Response, status
+from fastapi.responses import StreamingResponse
 
 from agent.api.dependencies import get_analysis_service
-from agent.api.envelope import Envelope, envelope
+from agent.api.envelope import Envelope, envelope, make_meta
 from agent.api.errors import NotFoundError, UnprocessableError
 from agent.api.schemas import AnalysisData, AnalysisRequest
-from agent.core.analysis import AnalysisService
+from agent.core.analysis import AnalysisService, AnalysisStream
 from agent.db.repository import AnalysisRecord
+from agent.llm.base import LLMError
 
 router = APIRouter(tags=["analysis"])
 
@@ -65,6 +76,55 @@ async def create_analysis(
     if from_cache:
         response.status_code = status.HTTP_200_OK
     return envelope(_to_data(record))
+
+
+def _sse(event: str, payload: dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+async def _sse_events(service: AnalysisService, stream: AnalysisStream) -> AsyncIterator[str]:
+    try:
+        async for item in service.run_stream(stream):
+            if item.type == "chunk":
+                yield _sse("chunk", {"text": item.text})
+            else:
+                assert item.record is not None
+                meta = make_meta().model_dump(mode="json") | {"cached": item.cached}
+                yield _sse("done", {"data": _to_data(item.record).model_dump(mode="json"), "meta": meta})
+    except LLMError as exc:
+        # Nothing was persisted or cached; the client should retry.
+        yield _sse("error", {"code": "DEPENDENCY_ERROR", "message": f"LLM analysis failed: {exc}"})
+
+
+@router.post(
+    "/analysis/stream",
+    responses={
+        status.HTTP_200_OK: {
+            "description": 'SSE stream: `chunk` events ({"text": delta}) followed by a terminal '
+            "`done` event carrying the persisted analysis envelope (meta.cached indicates a cache "
+            "replay), or `error` on a mid-stream LLM failure.",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
+)
+async def create_analysis_stream(body: AnalysisRequest, service: AnalysisServiceDep) -> StreamingResponse:
+    """Generate an LLM analysis, streaming text deltas over SSE.
+
+    Same request body and semantics as POST /analysis; cached analyses
+    replay as a single chunk. Validation, unknown-id, and degraded-LLM
+    failures return the standard JSON error envelope before any SSE bytes.
+    """
+    stream = await service.prepare_stream(
+        analysis_type=body.analysis_type,
+        game_id=_parse_uuid(body.game_id, "game_id"),
+        edge_id=_parse_uuid(body.edge_id, "edge_id"),
+        question=body.question,
+    )
+    return StreamingResponse(
+        _sse_events(service, stream),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/analysis/{analysis_id}", response_model=Envelope[AnalysisData])
