@@ -40,6 +40,12 @@ def _downgrade_schema(node: Any) -> Any:
         node["maximum"] = node.pop("exclusiveMaximum")
         node["exclusiveMaximum"] = True
 
+    # bare {type: null} (always-null field) -> untyped nullable; 3.0 has no
+    # null type, and untyped-nullable is the closest downgrade
+    if node.get("type") == "null":
+        node.pop("type")
+        node["nullable"] = True
+
     # anyOf [X, {type: null}] -> nullable X
     any_of = node.get("anyOf")
     if isinstance(any_of, list) and {"type": "null"} in any_of:
