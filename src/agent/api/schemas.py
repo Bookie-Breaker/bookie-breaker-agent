@@ -184,6 +184,7 @@ class EdgeAnalysisSummary(BaseModel):
 class EdgeDetailData(BaseModel):
     id: str
     game_id: str
+    game_external_id: str  # lines-service key, for movement/closing lookups
     league: str
     game: EdgeGame | None
     market_type: str
