@@ -7,11 +7,14 @@ from agent.clients.lines import LinesClient
 from agent.clients.prediction import PredictionClient
 from agent.clients.simulation import SimulationClient
 from agent.clients.statistics import StatisticsClient
+from agent.core.analysis import AnalysisService
 from agent.core.dashboard import DashboardService
 from agent.core.pipeline import PipelineRunner
+from agent.core.scheduler import PipelineScheduler
 from agent.core.slate import SlateService
-from agent.db.repository import EdgeRepository, PipelineRunRepository
+from agent.db.repository import EdgeAlertRepository, EdgeRepository, PipelineRunRepository, ScheduleRepository
 from agent.events.subscriber import EventSubscriber
+from agent.llm.base import LLMProvider
 
 
 def get_pipeline_runner(request: Request) -> PipelineRunner:
@@ -67,3 +70,28 @@ def get_emulator_client(request: Request) -> EmulatorClient:
 def get_event_subscriber(request: Request) -> EventSubscriber:
     subscriber: EventSubscriber = request.app.state.event_subscriber
     return subscriber
+
+
+def get_analysis_service(request: Request) -> AnalysisService:
+    service: AnalysisService = request.app.state.analysis_service
+    return service
+
+
+def get_alert_repo(request: Request) -> EdgeAlertRepository:
+    repo: EdgeAlertRepository = request.app.state.alert_repo
+    return repo
+
+
+def get_schedule_repo(request: Request) -> ScheduleRepository:
+    repo: ScheduleRepository = request.app.state.schedule_repo
+    return repo
+
+
+def get_scheduler(request: Request) -> PipelineScheduler:
+    scheduler: PipelineScheduler = request.app.state.scheduler
+    return scheduler
+
+
+def get_llm_provider(request: Request) -> LLMProvider:
+    provider: LLMProvider = request.app.state.llm_provider
+    return provider

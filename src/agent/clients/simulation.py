@@ -35,7 +35,8 @@ class SimulationClient(ServiceClient):
         body: dict[str, Any] = {"game_id": game_id, "force_refresh": force_refresh}
         if config:
             body["config"] = config
-        data = await self.post_data("/api/v1/sim/simulations", f"simulation for game {game_id}", body)
+        # Retriable: simulation runs dedupe upstream on game + config
+        data = await self.post_data("/api/v1/sim/simulations", f"simulation for game {game_id}", body, retriable=True)
         return SimulationRun.model_validate(data)
 
     async def health(self) -> bool:

@@ -39,7 +39,10 @@ class PredictionClient(ServiceClient):
         body: dict[str, Any] = {"game_id": game_id, "simulation_run_id": simulation_run_id}
         if market_types:
             body["market_types"] = market_types
-        data = await self.post_data("/api/v1/predict/predictions", f"predictions for game {game_id}", body)
+        # Retriable: prediction batches are idempotent per game + simulation run
+        data = await self.post_data(
+            "/api/v1/predict/predictions", f"predictions for game {game_id}", body, retriable=True
+        )
         return [PredictionItem.model_validate(item) for item in data.get("predictions", [])]
 
     async def latest_for_game(self, game_id: str, market_type: str | None = None) -> list[PredictionItem]:

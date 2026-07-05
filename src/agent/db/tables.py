@@ -120,3 +120,61 @@ edges = Table(
     Index("idx_edges_fresh", text("detected_at DESC"), postgresql_where=text("is_stale = FALSE")),
     Index("idx_edges_league", "league", text("detected_at DESC")),
 )
+
+analyses = Table(
+    "analyses",
+    metadata,
+    _uuid_pk(),
+    Column("analysis_type", Text, nullable=False),
+    Column("game_id", UUID(as_uuid=True)),
+    Column("edge_id", UUID(as_uuid=True), ForeignKey("edges.id")),
+    Column("title", Text, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("question", Text),
+    Column("model_used", Text, nullable=False),
+    Column("provider", Text, nullable=False),
+    Column("input_summary", Text),
+    # Token usage covers the deferred query_log's cost-accounting purpose.
+    Column("input_tokens", Integer),
+    Column("output_tokens", Integer),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
+    CheckConstraint(
+        "analysis_type IN ('GAME_PREVIEW', 'EDGE_BREAKDOWN', 'PERFORMANCE_REVIEW', 'DAILY_SUMMARY')",
+        name="chk_analyses_type",
+    ),
+    Index("idx_analyses_game_type", "game_id", "analysis_type"),
+)
+
+edge_alerts = Table(
+    "edge_alerts",
+    metadata,
+    _uuid_pk(),
+    Column("edge_id", UUID(as_uuid=True), ForeignKey("edges.id"), nullable=False),
+    Column("channel", Text, nullable=False, server_default=text("'redis'")),
+    Column("priority", Text, nullable=False),
+    Column("message", Text, nullable=False),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'")),
+    Column("delivered_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
+    Column("acknowledged_at", TIMESTAMP(timezone=True)),
+    CheckConstraint("channel IN ('redis')", name="chk_edge_alerts_channel"),
+    CheckConstraint("priority IN ('LOW', 'MEDIUM', 'HIGH')", name="chk_edge_alerts_priority"),
+    Index("idx_edge_alerts_delivery", "channel", "priority", text("delivered_at DESC")),
+)
+
+pipeline_schedules = Table(
+    "pipeline_schedules",
+    metadata,
+    _uuid_pk(),
+    Column("league", _enum("league_enum"), nullable=False, unique=True),
+    Column("cron_expression", Text, nullable=False),
+    Column("timezone", Text, nullable=False, server_default=text("'UTC'")),
+    Column("description", Text),
+    Column("enabled", Boolean, nullable=False, server_default=text("TRUE")),
+    Column("simulation_config", JSONB),
+    Column("auto_bet", Boolean, nullable=False, server_default=text("TRUE")),
+    Column("min_edge_threshold", Numeric(5, 2), nullable=False, server_default=text("3.0")),
+    Column("last_run_at", TIMESTAMP(timezone=True)),
+    Column("next_run_at", TIMESTAMP(timezone=True)),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
+)

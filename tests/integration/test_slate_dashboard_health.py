@@ -18,6 +18,7 @@ from tests.integration.conftest import (
     game_payload,
     insert_edge,
     iso,
+    mock_anthropic_health,
     performance_payload,
     utc_now,
 )
@@ -162,7 +163,8 @@ class TestHealth:
         assert deps["postgres"] == "healthy"
         assert deps["redis"] == "healthy"
         assert deps["event_subscriber"] == "healthy"
-        assert data["pipeline"]["next_scheduled_run"] is None
+        # anthropic is unmocked here, so the LLM reports unhealthy
+        assert deps["anthropic_api"] == "unhealthy"
 
     def test_all_healthy(self, client, upstream) -> None:
         healthy = Response(200, json=enveloped({"status": "healthy"}))
@@ -174,6 +176,9 @@ class TestHealth:
             (EMULATOR_URL, "/api/v1/emulator/health"),
         ):
             upstream.get(f"{url}{path}").mock(return_value=healthy)
+        mock_anthropic_health(upstream)
         response = client.get("/api/v1/agent/health")
         assert response.status_code == 200
-        assert response.json()["data"]["status"] == "healthy"
+        data = response.json()["data"]
+        assert data["status"] == "healthy"
+        assert data["dependencies"]["anthropic_api"] == "healthy"

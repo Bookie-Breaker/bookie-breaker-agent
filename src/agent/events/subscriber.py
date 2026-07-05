@@ -1,7 +1,8 @@
-"""Background Redis pub/sub subscriber with reconnect and cheap reactions.
+"""Background Redis pub/sub subscriber with reconnect and reactions.
 
-Phase 3 reactions per agent-api.md: staleness marking and cache
-invalidation only. Event-triggered pipeline re-runs arrive in Phase 4.
+Reactions: staleness marking and cache invalidation (Phase 3), plus
+debounced event-triggered pipeline re-runs via the RerunCoordinator for
+lines.updated and stats.updated (Phase 4).
 
 The subscriber never crashes the app: connection failures trigger a capped
 exponential backoff reconnect loop, and per-message handling errors are
@@ -16,6 +17,7 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
+from agent.core.rerun import RerunCoordinator
 from agent.db.repository import EdgeRepository
 
 logger = logging.getLogger(__name__)
@@ -36,10 +38,12 @@ class EventSubscriber:
         self,
         redis_client: "aioredis.Redis",
         edge_repo: EdgeRepository,
+        rerun: RerunCoordinator | None = None,
         max_backoff_seconds: float = 30.0,
     ) -> None:
         self._redis = redis_client
         self._edge_repo = edge_repo
+        self._rerun = rerun
         self._max_backoff = max_backoff_seconds
         self._task: asyncio.Task[None] | None = None
         self._connected = False
@@ -101,10 +105,12 @@ class EventSubscriber:
         try:
             if channel == "events:lines.updated":
                 await self._on_lines_updated(payload)
+            elif channel == "events:stats.updated":
+                await self._on_stats_updated(payload)
             elif channel == "events:game.completed":
                 await self._on_game_completed(payload)
             else:
-                logger.debug("event on %s observed (no Phase 3 reaction): %s", channel, payload.get("event"))
+                logger.debug("event on %s observed (no reaction): %s", channel, payload.get("event"))
         except Exception:  # noqa: BLE001 - handler failures must not kill the loop
             logger.warning("failed to handle event on %s", channel, exc_info=True)
 
@@ -117,6 +123,23 @@ class EventSubscriber:
         if stale:
             logger.info("marked %d edges stale after lines.updated for %d games", stale, len(game_external_ids))
         await self._invalidate_caches()
+        await self._request_reruns(payload, game_external_ids)
+
+    async def _on_stats_updated(self, payload: dict[str, Any]) -> None:
+        # Injury/stat changes shift predictions; re-run affected leagues.
+        await self._request_reruns(payload, [])
+
+    async def _request_reruns(self, payload: dict[str, Any], game_external_ids: list[str]) -> None:
+        """Resolve affected leagues (payload first, edges fallback) and
+        hand them to the debounced rerun coordinator."""
+        if self._rerun is None:
+            return
+        league = payload.get("league")
+        if isinstance(league, str) and league:
+            self._rerun.request(league)
+            return
+        for resolved in await self._edge_repo.leagues_for_game_externals(game_external_ids):
+            self._rerun.request(resolved)
 
     async def _on_game_completed(self, payload: dict[str, Any]) -> None:
         game_external_id = payload.get("game_external_id")

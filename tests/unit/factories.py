@@ -196,6 +196,10 @@ class FakeEdgeRepo:
             return [edge for edge in self.active if edge.league in leagues]
         return list(self.active)
 
+    async def leagues_for_game_externals(self, game_external_ids: list[str]) -> list[str]:
+        leagues = {edge.league for edge in self.active if edge.game_external_id in game_external_ids}
+        return sorted(leagues)
+
 
 class FakeEmulator:
     """Canned bankroll/performance; records placed bets."""

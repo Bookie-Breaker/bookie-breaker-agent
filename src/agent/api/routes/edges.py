@@ -19,6 +19,7 @@ from agent.api.envelope import Envelope, PageEnvelope, envelope, page_envelope
 from agent.api.errors import ApiError, NotFoundError
 from agent.api.pagination import decode_cursor, encode_cursor
 from agent.api.schemas import (
+    EdgeAnalysisSummary,
     EdgeBettingLine,
     EdgeDetailData,
     EdgeGame,
@@ -205,17 +206,19 @@ async def get_edge(
     """Edge detail with live-fetched prediction, line, and paper bet.
 
     Nested objects are fetched from their owning services and are null when
-    the owning service is unavailable; analysis is null until Phase 4.
+    the owning service is unavailable; analysis is the newest stored LLM
+    analysis for this edge, or null when none exists.
     """
     edge = await repo.get(edge_id)
     if edge is None:
         raise NotFoundError(f"Edge {edge_id} not found")
 
-    game, (prediction, simulation_probability), (betting_line, _), paper_bet = await asyncio.gather(
+    game, (prediction, simulation_probability), (betting_line, _), paper_bet, analysis_summary = await asyncio.gather(
         _fetch_game(statistics, edge),
         _fetch_prediction(prediction_client, edge),
         _fetch_betting_line(lines_client, edge),
         _fetch_paper_bet(emulator, edge),
+        repo.latest_analysis_summary(edge.id),
     )
 
     return envelope(
@@ -244,6 +247,12 @@ async def get_edge(
             prediction=prediction,
             betting_line=betting_line,
             paper_bet=paper_bet,
-            analysis=None,
+            analysis=EdgeAnalysisSummary(
+                id=str(analysis_summary.id),
+                title=analysis_summary.title,
+                created_at=analysis_summary.created_at.isoformat().replace("+00:00", "Z"),
+            )
+            if analysis_summary
+            else None,
         )
     )
