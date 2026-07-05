@@ -9,7 +9,9 @@ spending tokens; free-form questions bypass the cache.
 
 import logging
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import redis.asyncio as aioredis
 
@@ -20,7 +22,7 @@ from agent.clients.prediction import PredictionClient
 from agent.clients.reconcile import GameReconciler
 from agent.clients.statistics import Game, StatisticsClient
 from agent.db.repository import AnalysisRecord, AnalysisRepository, EdgeRecord, EdgeRepository
-from agent.llm.base import LLMError, LLMProvider
+from agent.llm.base import LLMError, LLMProvider, LLMResult, LLMStreamChunk
 from agent.llm.prompts import (
     RenderedPrompt,
     build_edge_breakdown,
@@ -31,6 +33,45 @@ from agent.llm.prompts import (
 logger = logging.getLogger(__name__)
 
 CACHEABLE_TYPES = ("GAME_PREVIEW", "EDGE_BREAKDOWN")
+
+
+@dataclass(frozen=True)
+class _Prepared:
+    """Validated request state shared by the JSON and streaming paths."""
+
+    analysis_type: str
+    game_id: uuid.UUID | None
+    edge_id: uuid.UUID | None
+    question: str | None
+    edge: EdgeRecord | None
+    cache_key: str | None
+    cached: AnalysisRecord | None
+
+
+@dataclass
+class AnalysisStream:
+    """A prepared stream: either a cached record replay or a live LLM stream.
+
+    prepare_stream() has already awaited the first provider chunk, so
+    constructing this object means pre-stream failures (degraded LLM,
+    validation) have been raised as JSON-mappable errors.
+    """
+
+    prepared: _Prepared
+    cached_record: AnalysisRecord | None = None
+    rendered: RenderedPrompt | None = None
+    iterator: AsyncIterator[LLMStreamChunk] | None = None
+    first_chunk: LLMStreamChunk | None = None
+
+
+@dataclass(frozen=True)
+class StreamEvent:
+    """What run_stream yields: text deltas, then one terminal done event."""
+
+    type: Literal["chunk", "done"]
+    text: str = ""
+    record: AnalysisRecord | None = None
+    cached: bool = False
 
 
 class AnalysisService:
@@ -66,6 +107,84 @@ class AnalysisService:
         question: str | None,
     ) -> tuple[AnalysisRecord, bool]:
         """Generate (or reuse) an analysis. Returns (record, from_cache)."""
+        prepared = await self._prepare(analysis_type, game_id, edge_id, question)
+        if prepared.cached is not None:
+            return prepared.cached, True
+
+        rendered = await self._render(prepared.analysis_type, prepared.game_id, prepared.edge, prepared.question)
+        try:
+            result = await self._llm.complete(system=rendered.system, prompt=rendered.prompt, tier=rendered.tier)
+        except LLMError as exc:
+            raise DependencyError(f"LLM analysis failed: {exc}") from exc
+
+        record = await self._persist(prepared, rendered, result)
+        return record, False
+
+    async def prepare_stream(
+        self,
+        analysis_type: str,
+        game_id: uuid.UUID | None,
+        edge_id: uuid.UUID | None,
+        question: str | None,
+    ) -> AnalysisStream:
+        """Phase A of streaming: validate, check the cache, and await the
+        first provider chunk so degraded-LLM/validation failures surface as
+        ordinary JSON-mappable errors before any SSE bytes are sent."""
+        prepared = await self._prepare(analysis_type, game_id, edge_id, question)
+        if prepared.cached is not None:
+            return AnalysisStream(prepared=prepared, cached_record=prepared.cached)
+
+        rendered = await self._render(prepared.analysis_type, prepared.game_id, prepared.edge, prepared.question)
+        iterator = self._llm.stream(system=rendered.system, prompt=rendered.prompt, tier=rendered.tier)
+        try:
+            first_chunk = await anext(iterator)
+        except LLMError as exc:
+            raise DependencyError(f"LLM analysis failed: {exc}") from exc
+        except StopAsyncIteration as exc:
+            raise DependencyError("LLM analysis failed: provider stream was empty") from exc
+        return AnalysisStream(prepared=prepared, rendered=rendered, iterator=iterator, first_chunk=first_chunk)
+
+    async def run_stream(self, stream: AnalysisStream) -> AsyncIterator[StreamEvent]:
+        """Phase B of streaming: yield deltas, then persist and yield done.
+
+        Cached analyses replay as a single chunk. Mid-stream LLMErrors
+        propagate to the caller with nothing persisted or cached, as does
+        cancellation on client disconnect.
+        """
+        if stream.cached_record is not None:
+            yield StreamEvent(type="chunk", text=stream.cached_record.content)
+            yield StreamEvent(type="done", record=stream.cached_record, cached=True)
+            return
+
+        assert stream.iterator is not None and stream.first_chunk is not None and stream.rendered is not None
+        final: LLMResult | None = None
+        chunk = stream.first_chunk
+        while True:
+            if chunk.text:
+                yield StreamEvent(type="chunk", text=chunk.text)
+            if chunk.final is not None:
+                final = chunk.final
+                break
+            try:
+                chunk = await anext(stream.iterator)
+            except StopAsyncIteration:
+                break
+        if final is None:
+            raise LLMError("provider stream ended without a final result")
+
+        record = await self._persist(stream.prepared, stream.rendered, final)
+        yield StreamEvent(type="done", record=record, cached=False)
+
+    async def get(self, analysis_id: uuid.UUID) -> AnalysisRecord | None:
+        return await self._analysis_repo.get(analysis_id)
+
+    async def _prepare(
+        self,
+        analysis_type: str,
+        game_id: uuid.UUID | None,
+        edge_id: uuid.UUID | None,
+        question: str | None,
+    ) -> _Prepared:
         edge: EdgeRecord | None = None
         if analysis_type == "EDGE_BREAKDOWN":
             if edge_id is None:
@@ -81,25 +200,26 @@ class AnalysisService:
             raise UnprocessableError(f"Unknown analysis_type: {analysis_type}")
 
         cache_key = self._cache_key(analysis_type, game_id, edge_id) if question is None else None
-        if cache_key is not None:
-            cached = await self._cached_record(cache_key)
-            if cached is not None:
-                return cached, True
+        cached = await self._cached_record(cache_key) if cache_key is not None else None
+        return _Prepared(
+            analysis_type=analysis_type,
+            game_id=game_id,
+            edge_id=edge_id,
+            question=question,
+            edge=edge,
+            cache_key=cache_key,
+            cached=cached,
+        )
 
-        rendered = await self._render(analysis_type, game_id, edge, question)
-        try:
-            result = await self._llm.complete(system=rendered.system, prompt=rendered.prompt, tier=rendered.tier)
-        except LLMError as exc:
-            raise DependencyError(f"LLM analysis failed: {exc}") from exc
-
+    async def _persist(self, prepared: _Prepared, rendered: RenderedPrompt, result: LLMResult) -> AnalysisRecord:
         record = await self._analysis_repo.insert(
             {
-                "analysis_type": analysis_type,
-                "game_id": game_id,
-                "edge_id": edge_id if analysis_type == "EDGE_BREAKDOWN" else None,
+                "analysis_type": prepared.analysis_type,
+                "game_id": prepared.game_id,
+                "edge_id": prepared.edge_id if prepared.analysis_type == "EDGE_BREAKDOWN" else None,
                 "title": rendered.title,
                 "content": result.text,
-                "question": question,
+                "question": prepared.question,
                 "model_used": result.model,
                 "provider": result.provider,
                 "input_summary": rendered.input_summary,
@@ -107,12 +227,9 @@ class AnalysisService:
                 "output_tokens": result.output_tokens,
             }
         )
-        if cache_key is not None:
-            await self._set_cached(cache_key, record.id)
-        return record, False
-
-    async def get(self, analysis_id: uuid.UUID) -> AnalysisRecord | None:
-        return await self._analysis_repo.get(analysis_id)
+        if prepared.cache_key is not None:
+            await self._set_cached(prepared.cache_key, record.id)
+        return record
 
     # ------------------------------------------------------------------
     # Context gathering

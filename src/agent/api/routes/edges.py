@@ -225,6 +225,7 @@ async def get_edge(
         EdgeDetailData(
             id=str(edge.id),
             game_id=str(edge.game_id),
+            game_external_id=edge.game_external_id,
             league=edge.league,
             game=game,
             market_type=edge.market_type,
