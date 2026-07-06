@@ -72,13 +72,15 @@ def migrated_database_url(database_url: str) -> str:
     os.environ["DATABASE_URL"] = database_url
     config = Config("alembic.ini")
     command.upgrade(config, "head")
-    # Migrations 0004/0005 seed the FIFA_WC/EPL and MLB/NCAA_BSB schedules;
-    # the shared session DB starts schedule-free so schedule/dashboard tests
-    # keep their pre-seed baseline. test_migration_seeds.py re-applies the
-    # seed migrations to cover the seeds.
+    # Migrations 0004/0005/0006 seed the FIFA_WC/EPL, MLB/NCAA_BSB, and
+    # NFL/NCAA_FB/NHL/NCAA_BB schedules; the shared session DB starts
+    # schedule-free so schedule/dashboard tests keep their pre-seed
+    # baseline. test_migration_seeds.py re-applies the seed migrations to
+    # cover the seeds.
     execute_sql(
         database_url,
-        "DELETE FROM agent.pipeline_schedules WHERE league IN ('FIFA_WC', 'EPL', 'MLB', 'NCAA_BSB')",
+        "DELETE FROM agent.pipeline_schedules WHERE league IN"
+        " ('FIFA_WC', 'EPL', 'MLB', 'NCAA_BSB', 'NFL', 'NCAA_FB', 'NHL', 'NCAA_BB')",
     )
     return database_url
 
