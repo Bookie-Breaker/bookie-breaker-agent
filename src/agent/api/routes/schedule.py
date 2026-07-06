@@ -19,7 +19,7 @@ router = APIRouter(tags=["schedule"])
 ScheduleRepoDep = Annotated[ScheduleRepository, Depends(get_schedule_repo)]
 SchedulerDep = Annotated[PipelineScheduler, Depends(get_scheduler)]
 
-LEAGUES = ("NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB")
+LEAGUES = ("NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB", "FIFA_WC", "EPL", "NHL", "NCAA_HKY")
 
 
 def _iso(value: datetime | None) -> str | None:

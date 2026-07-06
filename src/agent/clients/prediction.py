@@ -13,6 +13,9 @@ class PredictionItem(BaseModel):
     id: str
     market_type: str
     selection: str
+    # Nullable since Phase 6: prediction-engine tags rows with the line side
+    # (HOME/AWAY/DRAW/OVER/UNDER) for side-based matching (ADR-027)
+    side: str | None = None
     predicted_probability: float
     simulation_probability: float | None = None
     adjustment_magnitude: float = 0.0

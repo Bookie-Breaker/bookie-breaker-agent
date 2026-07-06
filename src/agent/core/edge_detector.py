@@ -3,8 +3,9 @@
 Composition per algorithms/edge-detection.md sections 1-4:
 
 1. Group the game's lines by (sportsbook, market, line) and de-vig each
-   two-sided pair (multiplicative by default). Markets missing the opposite
-   side are skipped -- de-vigging requires both prices.
+   complete market (multiplicative by default): {HOME, AWAY}, {OVER, UNDER},
+   or -- MONEYLINE only -- the three-way {HOME, AWAY, DRAW} (ADR-027).
+   Markets missing a side are skipped -- de-vigging requires every price.
 2. ``edge_percentage`` is (predicted - devigged implied) in percentage
    points; ``expected_value`` is computed from the raw quoted odds
    (``predicted * decimal_odds - 1``) since that is what a bet pays.
@@ -32,6 +33,7 @@ from agent.edges import (
     american_to_implied_prob,
     calculate_ev_pct,
     devig,
+    devig_many,
     edge_quality_score,
     kelly_fraction,
     market_efficiency,
@@ -39,6 +41,11 @@ from agent.edges import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Side sets that make a market complete and de-viggable. Three-way applies
+# to MONEYLINE only (ADR-027: soccer moneylines carry a DRAW side).
+TWO_WAY_SIDE_SETS = (frozenset({"HOME", "AWAY"}), frozenset({"OVER", "UNDER"}))
+THREE_WAY_MONEYLINE_SIDES = frozenset({"HOME", "AWAY", "DRAW"})
 
 # Target model expected calibration error (algorithms/edge-detection.md
 # section 2: "~3% ECE target"); feeds the quality score until per-model
@@ -139,15 +146,15 @@ class EdgeDetector:
             return []
 
         prediction_map = {_prediction_key(p.market_type, p.selection): p for p in predictions}
+        side_map = {(p.market_type.upper(), p.side.upper()): p for p in predictions if p.side}
 
         candidates: dict[tuple[str, str, float | None], EdgeCandidate] = {}
-        for group in self._group_two_sided(lines):
-            sides = list(group.values())
-            devigged = self._devig_pair(sides[0], sides[1])
+        for group in self._group_markets(lines):
+            devigged = self._devig_group(list(group.values()))
             if devigged is None:
                 continue
             for line, implied in devigged:
-                matched = self._match_prediction(prediction_map, line, group)
+                matched = self._match_prediction(prediction_map, side_map, line, group)
                 if matched is None:
                     continue
                 predicted, prediction = matched
@@ -164,12 +171,14 @@ class EdgeDetector:
                     candidates[key] = candidate
         return list(candidates.values())
 
-    def _group_two_sided(self, lines: list[LineSnapshot]) -> list[dict[str, LineSnapshot]]:
-        """Group lines into two-sided (sportsbook, market, line) pairs.
+    def _group_markets(self, lines: list[LineSnapshot]) -> list[dict[str, LineSnapshot]]:
+        """Group lines into complete (sportsbook, market, line) markets.
 
         Spreads are grouped by absolute line value since the two sides carry
-        mirrored values (-3.5 / +3.5). Markets where a book quotes only one
-        side are skipped: de-vigging needs both prices.
+        mirrored values (-3.5 / +3.5). A market is complete when its sides
+        form exactly {HOME, AWAY}, {OVER, UNDER}, or -- MONEYLINE only --
+        the three-way {HOME, AWAY, DRAW}. Incomplete markets are skipped:
+        de-vigging needs every price.
         """
         groups: dict[tuple[str, str, float | None], dict[str, LineSnapshot]] = {}
         for line in lines:
@@ -179,44 +188,56 @@ class EdgeDetector:
             key = (line.sportsbook_key, line.market_type.upper(), line_key)
             groups.setdefault(key, {})[line.side] = line
 
-        pairs: list[dict[str, LineSnapshot]] = []
+        complete: list[dict[str, LineSnapshot]] = []
         for key, sides in groups.items():
-            if len(sides) == 2:
-                pairs.append(sides)
+            side_set = frozenset(sides)
+            if side_set in TWO_WAY_SIDE_SETS or (key[1] == "MONEYLINE" and side_set == THREE_WAY_MONEYLINE_SIDES):
+                complete.append(sides)
             else:
-                logger.debug("skipping one-sided market %s (sides: %s)", key, sorted(sides))
-        return pairs
+                logger.debug("skipping incomplete market %s (sides: %s)", key, sorted(sides))
+        return complete
 
-    def _devig_pair(self, line_a: LineSnapshot, line_b: LineSnapshot) -> list[tuple[LineSnapshot, float]] | None:
-        raw_a = american_to_implied_prob(line_a.odds_american)
-        raw_b = american_to_implied_prob(line_b.odds_american)
+    def _devig_group(self, group_lines: list[LineSnapshot]) -> list[tuple[LineSnapshot, float]] | None:
+        raws = [american_to_implied_prob(line.odds_american) for line in group_lines]
         try:
-            true_a, true_b = devig(raw_a, raw_b, self._devig_method)
+            if len(group_lines) == 2:
+                true_probs: tuple[float, ...] = devig(raws[0], raws[1], self._devig_method)
+            else:
+                true_probs = devig_many(raws, self._devig_method)
         except ValueError:
             logger.debug(
-                "devig failed for %s %s (%d/%d); skipping market",
-                line_a.sportsbook_key,
-                line_a.market_type,
-                line_a.odds_american,
-                line_b.odds_american,
+                "devig failed for %s %s (%s); skipping market",
+                group_lines[0].sportsbook_key,
+                group_lines[0].market_type,
+                "/".join(str(line.odds_american) for line in group_lines),
             )
             return None
-        return [(line_a, true_a), (line_b, true_b)]
+        return list(zip(group_lines, true_probs, strict=True))
 
     @staticmethod
     def _match_prediction(
         prediction_map: dict[tuple[str, str], PredictionItem],
+        side_map: dict[tuple[str, str], PredictionItem],
         line: LineSnapshot,
         group: dict[str, LineSnapshot],
     ) -> tuple[float, PredictionItem] | None:
         """Find the calibrated probability for a line's side.
 
-        The prediction selection matches one side of the market; the
-        opposite side's probability is its complement (two-way markets).
+        Prediction rows with an explicit side match by (market_type, side);
+        otherwise the selection string matches one side of the market. The
+        complement fallback (P(other) = 1 - P) applies only to two-sided
+        markets -- in a three-way group every side needs its own prediction
+        row or that side is skipped (ADR-027).
         """
+        if line.side:
+            by_side = side_map.get((line.market_type.upper(), line.side.upper()))
+            if by_side is not None:
+                return by_side.predicted_probability, by_side
         direct = prediction_map.get(_prediction_key(line.market_type, line.selection))
         if direct is not None:
             return direct.predicted_probability, direct
+        if len(group) != 2:
+            return None
         for side, other in group.items():
             if side == line.side:
                 continue

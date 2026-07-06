@@ -14,6 +14,13 @@ MIN_EV_PCT_BY_LEAGUE: dict[str, float] = {
     "NCAA_BB": 2.0,
     "MLB": 2.5,
     "NCAA_BSB": 2.0,
+    # Heavily-bet global market plus a small-sample model: demand more edge
+    "FIFA_WC": 4.0,
+    # Same reasoning as FIFA_WC, slightly less extreme (full club season)
+    "EPL": 3.5,
+    "NHL": 3.0,
+    # Thin market like the other NCAA leagues
+    "NCAA_HKY": 2.0,
 }
 
 DEFAULT_MIN_EV_PCT = 3.0

@@ -33,7 +33,7 @@ metadata = MetaData(schema="agent")
 # this service).
 _ENUM_VALUES: dict[str, tuple[str, ...]] = {
     "market_type_enum": ("SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP", "TEAM_PROP", "GAME_PROP", "FUTURE", "LIVE"),
-    "league_enum": ("NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB"),
+    "league_enum": ("NFL", "NBA", "MLB", "NCAA_FB", "NCAA_BB", "NCAA_BSB", "FIFA_WC", "EPL", "NHL", "NCAA_HKY"),
 }
 
 
@@ -107,7 +107,9 @@ edges = Table(
     Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
     Column("is_stale", Boolean, nullable=False, server_default=text("FALSE")),
     Column("paper_bet_id", UUID(as_uuid=True)),
-    CheckConstraint("side IS NULL OR side IN ('HOME', 'AWAY', 'OVER', 'UNDER')", name="chk_edges_side"),
+    # DRAW is only valid on MONEYLINE markets (ADR-027); enforced by
+    # detection logic, the constraint keeps the side vocabulary closed.
+    CheckConstraint("side IS NULL OR side IN ('HOME', 'AWAY', 'DRAW', 'OVER', 'UNDER')", name="chk_edges_side"),
     CheckConstraint(
         "predicted_probability > 0 AND predicted_probability < 1",
         name="chk_edges_predicted_probability_range",
