@@ -72,6 +72,10 @@ def migrated_database_url(database_url: str) -> str:
     os.environ["DATABASE_URL"] = database_url
     config = Config("alembic.ini")
     command.upgrade(config, "head")
+    # Migration 0004 seeds the FIFA_WC/EPL schedules; the shared session DB
+    # starts schedule-free so schedule/dashboard tests keep their pre-seed
+    # baseline. test_migration_seeds.py re-applies 0004 to cover the seeds.
+    execute_sql(database_url, "DELETE FROM agent.pipeline_schedules WHERE league IN ('FIFA_WC', 'EPL')")
     return database_url
 
 
