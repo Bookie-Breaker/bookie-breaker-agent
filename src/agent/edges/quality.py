@@ -15,6 +15,18 @@ MARKET_EFFICIENCY: dict[tuple[str, str], float] = {
     ("NCAA_BB", "SPREAD"): 0.70,
     ("NCAA_FB", "SPREAD"): 0.65,
     ("NCAA_BSB", "MONEYLINE"): 0.55,
+    ("FIFA_WC", "MONEYLINE"): 0.92,
+    ("FIFA_WC", "TOTAL"): 0.90,
+    ("FIFA_WC", "SPREAD"): 0.88,
+    ("EPL", "MONEYLINE"): 0.90,
+    ("EPL", "TOTAL"): 0.88,
+    ("EPL", "SPREAD"): 0.86,
+    ("NHL", "MONEYLINE"): 0.82,
+    ("NHL", "TOTAL"): 0.80,
+    ("NHL", "SPREAD"): 0.78,
+    ("NCAA_HKY", "MONEYLINE"): 0.70,
+    ("NCAA_HKY", "TOTAL"): 0.70,
+    ("NCAA_HKY", "SPREAD"): 0.70,
 }
 
 DEFAULT_MARKET_EFFICIENCY = 0.75
