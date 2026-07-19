@@ -308,4 +308,8 @@ class PipelineRunner:
             "prediction_id": uuid.UUID(candidate.prediction_id) if candidate.prediction_id else None,
             "simulation_run_id": uuid.UUID(candidate.simulation_run_id) if candidate.simulation_run_id else None,
             "expires_at": candidate.expires_at,
+            "player_external_id": candidate.player_external_id,
+            "stat_type": candidate.stat_type,
+            "prop_type": candidate.prop_type,
+            "is_live": candidate.is_live,
         }

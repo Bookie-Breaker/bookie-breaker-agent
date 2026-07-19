@@ -17,6 +17,10 @@ class PredictionItem(BaseModel):
     # (HOME/AWAY/DRAW/OVER/UNDER) for side-based matching (ADR-027)
     side: str | None = None
     predicted_probability: float
+    # Player-prop metadata (Phase 7 Wave 0); None for game-market predictions
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
     simulation_probability: float | None = None
     adjustment_magnitude: float = 0.0
     confidence_lower: float | None = None

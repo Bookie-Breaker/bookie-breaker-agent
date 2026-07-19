@@ -21,6 +21,10 @@ class LineSnapshot(BaseModel):
     selection: str = ""
     side: str = ""
     line_value: float | None = None
+    # Player-prop metadata (Phase 7 Wave 0); None for game-market lines
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
     odds_american: int = 0
     odds_decimal: float = 0.0
     implied_probability: float | None = None
