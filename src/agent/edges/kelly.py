@@ -31,6 +31,30 @@ def kelly_fraction(
     return min(fractional, max_bet_pct)
 
 
+def correlated_kelly(
+    joint_probability: float,
+    combined_decimal_odds: float,
+    kelly_multiplier: float = 0.25,
+    max_bet_pct: float = 0.05,
+) -> float:
+    """Fractional Kelly for a parlay treated as one bet on the joint outcome.
+
+    The parlay either wins at the combined decimal odds or loses the stake,
+    so standard Kelly applies with b = combined_decimal - 1 and p being the
+    correlation-adjusted joint probability (edge-detection.md section 5).
+    Clamp conventions match kelly_fraction: 0.0 when there is no edge,
+    quarter Kelly by default, hard-capped at max_bet_pct of bankroll.
+    """
+    b = combined_decimal_odds - 1.0
+    if b <= 0:
+        return 0.0
+    p = joint_probability
+    full_kelly = (b * p - (1.0 - p)) / b
+    if full_kelly <= 0:
+        return 0.0
+    return min(full_kelly * kelly_multiplier, max_bet_pct)
+
+
 @dataclass(frozen=True)
 class BetSizing:
     """A sized bet, before or after simultaneous-exposure scaling."""

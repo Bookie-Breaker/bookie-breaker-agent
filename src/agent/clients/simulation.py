@@ -19,12 +19,43 @@ class SimulationRun(BaseModel):
     completed_at: str = ""
 
 
+class CorrelationsData(BaseModel):
+    """Joint outcome structure for one simulation run (Phase 7 Wave 1).
+
+    Leg keys are canonical: MONEYLINE:HOME|AWAY|DRAW, SPREAD:HOME:{line},
+    SPREAD:AWAY:{line}, TOTAL:OVER:{line}, TOTAL:UNDER:{line} (lines in %g
+    format, e.g. SPREAD:HOME:-1.5). joint_probability is present when the
+    request pinned specific legs via ?legs=.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    simulation_run_id: str
+    game_id: str = ""
+    iterations: int = 0
+    legs: list[str] = []
+    marginals: dict[str, float] = {}
+    matrix: list[list[float]] = []
+    joint_probability: float | None = None
+    joint_goal_grid: list[list[float]] | None = None
+
+
 class SimulationClient(ServiceClient):
     service_name = "simulation-engine"
 
     async def latest_for_game(self, game_id: str) -> SimulationRun:
         data = await self.get_data(f"/api/v1/sim/games/{game_id}/latest", f"latest simulation for game {game_id}")
         return SimulationRun.model_validate(data)
+
+    async def get_correlations(self, simulation_run_id: str, legs: list[str] | None = None) -> CorrelationsData:
+        """Pairwise correlations (and joint probability when legs are pinned)."""
+        params: dict[str, Any] | None = {"legs": ",".join(legs)} if legs else None
+        data = await self.get_data(
+            f"/api/v1/sim/simulations/{simulation_run_id}/correlations",
+            f"correlations for simulation {simulation_run_id}",
+            params,
+        )
+        return CorrelationsData.model_validate(data)
 
     async def run_simulation(
         self,

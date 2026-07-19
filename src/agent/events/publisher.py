@@ -9,12 +9,13 @@ from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
-from agent.db.repository import EdgeRecord
+from agent.db.repository import EdgeRecord, ParlayRecord
 
 logger = logging.getLogger(__name__)
 
 EDGE_DETECTED_CHANNEL = "events:edge.detected"
 PREDICTION_COMPLETED_CHANNEL = "events:prediction.completed"
+PARLAY_DETECTED_CHANNEL = "events:parlay.detected"
 
 
 def _utc_now_iso() -> str:
@@ -64,6 +65,35 @@ async def publish_edge_detected(
         await redis_client.publish(EDGE_DETECTED_CHANNEL, json.dumps(payload))
     except Exception:  # noqa: BLE001 - pub/sub is best-effort by design
         logger.warning("failed to publish %s for edge %s", EDGE_DETECTED_CHANNEL, edge.id, exc_info=True)
+
+
+def parlay_detected_payload(parlay: ParlayRecord) -> dict[str, object]:
+    """Mirror of edge_detected_payload for actionable parlays (Wave 1)."""
+    return {
+        "event": "parlay.detected",
+        "timestamp": _utc_now_iso(),
+        "parlay_id": str(parlay.id),
+        "league": parlay.league,
+        "leg_count": parlay.leg_count,
+        "is_same_game": parlay.is_same_game,
+        "game_external_ids": [leg.game_external_id for leg in parlay.legs],
+        "joint_probability": parlay.joint_probability,
+        "independent_probability": parlay.independent_probability,
+        "correlation_edge": parlay.correlation_edge,
+        "combined_odds_american": parlay.combined_odds_american,
+        "ev_pct": round(parlay.expected_value * 100, 3),
+        "kelly_fraction": parlay.kelly_fraction,
+        "detected_at": parlay.detected_at.isoformat().replace("+00:00", "Z"),
+        "expires_at": parlay.expires_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
+async def publish_parlay_detected(redis_client: "aioredis.Redis", parlay: ParlayRecord) -> None:
+    payload = parlay_detected_payload(parlay)
+    try:
+        await redis_client.publish(PARLAY_DETECTED_CHANNEL, json.dumps(payload))
+    except Exception:  # noqa: BLE001 - pub/sub is best-effort by design
+        logger.warning("failed to publish %s for parlay %s", PARLAY_DETECTED_CHANNEL, parlay.id, exc_info=True)
 
 
 async def publish_prediction_completed(

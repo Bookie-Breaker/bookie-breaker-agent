@@ -25,6 +25,7 @@ from agent.clients.statistics import Game, StatisticsClient
 from agent.core.alerts import AlertService
 from agent.core.bettor import AutoBettor, candidate_key
 from agent.core.edge_detector import EdgeCandidate, EdgeDetector
+from agent.core.parlay_scanner import ParlayScanner
 from agent.db.repository import (
     DuplicateRunningRunError,
     EdgeRecord,
@@ -92,6 +93,7 @@ class PipelineRunner:
         alerts: AlertService,
         redis_client: "aioredis.Redis",
         concurrency: int = 4,
+        parlay_scanner: ParlayScanner | None = None,
     ) -> None:
         self._run_repo = run_repo
         self._edge_repo = edge_repo
@@ -105,6 +107,9 @@ class PipelineRunner:
         self._alerts = alerts
         self._redis = redis_client
         self._concurrency = concurrency
+        # Optional post-edge-detection parlay scan (PARLAY_SCAN_ENABLED);
+        # None keeps the Phase 3 pipeline shape.
+        self._parlay_scanner = parlay_scanner
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def start_run(self, params: RunParams, trigger: str = "MANUAL") -> tuple[PipelineRunRecord, int]:
@@ -195,6 +200,7 @@ class PipelineRunner:
                 actionable.append(record)
 
         await self._alerts.dispatch_all(actionable)
+        await self._scan_parlays(candidates)
 
         bets_placed = 0
         bet_errors: dict[str, str] = {}
@@ -244,6 +250,19 @@ class PipelineRunner:
             len(records),
             bets_placed,
         )
+
+    async def _scan_parlays(self, candidates: list[EdgeCandidate]) -> None:
+        """Best-effort same-game parlay scan over this run's edge games."""
+        if self._parlay_scanner is None:
+            return
+        for game_external_id in sorted({c.game_external_id for c in candidates}):
+            try:
+                found = await self._parlay_scanner.scan_game(game_external_id)
+            except Exception:  # noqa: BLE001 - the scan never fails a run
+                logger.warning("parlay scan failed for game %s", game_external_id, exc_info=True)
+                continue
+            if found:
+                logger.info("parlay scan found %d actionable parlays for game %s", len(found), game_external_id)
 
     async def _process_game(self, game: Game, params: RunParams, now: datetime) -> _GameOutcome:
         outcome = _GameOutcome(game=game)
