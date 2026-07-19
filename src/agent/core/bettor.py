@@ -12,12 +12,16 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from agent.api.errors import ApiError
 from agent.clients.emulator import EmulatorClient
 from agent.core.edge_detector import EdgeCandidate
-from agent.db.repository import EdgeRecord, EdgeRepository
+from agent.db.repository import EdgeRecord, EdgeRepository, ParlayRepository
 from agent.edges import BetSizing, scale_simultaneous_bets, should_bet_now
+
+if TYPE_CHECKING:
+    from agent.core.parlay import ParlayEvaluation
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,19 @@ def idempotency_key(edge: "EdgeCandidate | EdgeRecord") -> uuid.UUID:
     return uuid.uuid5(BET_IDEMPOTENCY_NAMESPACE, candidate_key(edge))
 
 
+def parlay_identity(evaluation: "ParlayEvaluation") -> str:
+    """Order-independent identity for a parlay (sorted leg identities)."""
+    legs = sorted(
+        f"{leg.game_external_id}:{leg.market_type}:{leg.side}:{leg.line_value}:{leg.sportsbook_key}:{leg.odds_american}"
+        for leg in evaluation.legs
+    )
+    return "parlay|" + "|".join(legs)
+
+
+def parlay_idempotency_key(evaluation: "ParlayEvaluation") -> uuid.UUID:
+    return uuid.uuid5(BET_IDEMPOTENCY_NAMESPACE, parlay_identity(evaluation))
+
+
 @dataclass(frozen=True)
 class BetPlan:
     """Sizing outcome for one pipeline run's candidates.
@@ -62,10 +79,12 @@ class AutoBettor:
         emulator: EmulatorClient,
         edge_repo: EdgeRepository,
         max_total_exposure: float = 0.15,
+        parlay_repo: ParlayRepository | None = None,
     ) -> None:
         self._emulator = emulator
         self._edge_repo = edge_repo
         self._max_total_exposure = max_total_exposure
+        self._parlay_repo = parlay_repo
 
     async def fetch_bankroll(self) -> tuple[float, float]:
         """Current (bankroll_units, open_exposure_units); safe fallback when down."""
@@ -167,6 +186,50 @@ class AutoBettor:
         bet = await self._emulator.place_bet(body, idempotency_key=str(idempotency_key(edge)))
         await self._edge_repo.set_paper_bet(edge.id, uuid.UUID(bet.id))
         return bet.id
+
+    async def place_parlay(self, evaluation: "ParlayEvaluation") -> str | None:
+        """Place one paper parlay via the emulator's parlay endpoint.
+
+        Callers gate this exactly like singles (auto_bet config; the
+        scanner only wires it when PARLAY_AUTO_BET is on). The idempotency
+        key is a UUIDv5 over the sorted leg identity, so retries of the
+        same priced parlay never double-bet. Returns the paper bet id, or
+        None for zero-stake or below-threshold evaluations.
+        """
+        if not evaluation.meets_threshold or evaluation.recommended_stake <= 0:
+            return None
+        body = {
+            "legs": [
+                {
+                    "game_id": leg.game_id,
+                    "game_external_id": leg.game_external_id,
+                    "market_type": leg.market_type,
+                    "selection": leg.selection,
+                    "side": leg.side,
+                    "line_value": leg.line_value,
+                    "sportsbook_key": leg.sportsbook_key,
+                }
+                for leg in evaluation.legs
+            ],
+            "stake": evaluation.recommended_stake,
+            "predicted_probability": evaluation.joint_probability,
+            "edge_percentage": round((evaluation.joint_probability - 1.0 / evaluation.combined_odds_decimal) * 100, 3),
+            "kelly_fraction": evaluation.kelly_fraction,
+            "reasoning": self._parlay_reasoning(evaluation),
+        }
+        bet = await self._emulator.place_parlay(body, idempotency_key=str(parlay_idempotency_key(evaluation)))
+        if self._parlay_repo is not None and evaluation.parlay_id is not None:
+            await self._parlay_repo.set_paper_bet(uuid.UUID(evaluation.parlay_id), uuid.UUID(bet.id))
+        return bet.id
+
+    @staticmethod
+    def _parlay_reasoning(evaluation: "ParlayEvaluation") -> str:
+        return (
+            f"Auto-parlay ({len(evaluation.legs)} legs, {evaluation.method}): joint probability "
+            f"{evaluation.joint_probability:.3f} vs independent {evaluation.independent_probability:.3f} "
+            f"at {evaluation.combined_odds_american:+d}; EV {evaluation.ev_pct:.1f}% of stake, "
+            f"correlation edge {evaluation.correlation_edge:+.3f}."
+        )
 
     @staticmethod
     def _reasoning(edge: EdgeRecord) -> str:

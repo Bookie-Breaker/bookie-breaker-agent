@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     devig_method: str = "multiplicative"  # multiplicative | additive | shin
     pipeline_concurrency: int = 4  # bounded per-game concurrency inside a run
 
+    # Parlays (Phase 7 Wave 1). Scanning and auto-betting are off by
+    # default; the evaluate API is always available.
+    parlay_scan_enabled: bool = False  # run the same-game parlay scan after edge detection
+    parlay_scan_min_edge_pct: float = 0.6  # fraction of the league min EV an edge needs to enter the scan
+    parlay_auto_bet: bool = False  # let the scanner place paper parlays for meets_threshold results
+
     llm_provider: str = "anthropic"  # anthropic | ollama (ADR-011: config-only switch)
     anthropic_api_key: str | None = None
     llm_base_url: str | None = None  # None -> provider default (api.anthropic.com / http://ollama:11434)

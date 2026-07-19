@@ -23,6 +23,8 @@ class PaperBet(BaseModel):
     profit_loss: float | None = None
     placed_at: str = ""
     graded_at: str | None = None
+    # Parlay parent flag (Phase 7 Wave 1); False for single bets.
+    is_parlay: bool = False
 
 
 class Bankroll(BaseModel):
@@ -58,6 +60,20 @@ class EmulatorClient(ServiceClient):
         data = await self.post_data(
             "/api/v1/emulator/bets",
             f"paper bet on game {body.get('game_id')}",
+            body,
+            headers={"X-Idempotency-Key": idempotency_key},
+        )
+        return PaperBet.model_validate(data)
+
+    async def place_parlay(self, body: dict[str, Any], idempotency_key: str) -> PaperBet:
+        """Place a paper parlay (is_parlay parent bet + legs upstream).
+
+        Single-shot like place_bet: the X-Idempotency-Key makes retries of
+        the same parlay identity safe on the emulator side.
+        """
+        data = await self.post_data(
+            "/api/v1/emulator/parlays",
+            f"paper parlay ({len(body.get('legs', []))} legs)",
             body,
             headers={"X-Idempotency-Key": idempotency_key},
         )

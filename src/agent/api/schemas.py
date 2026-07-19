@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Pipeline
@@ -138,6 +138,71 @@ class EdgeListItem(BaseModel):
     is_stale: bool
     has_paper_bet: bool
     paper_bet_id: str | None
+
+
+# ---------------------------------------------------------------------------
+# Parlays (Phase 7 Wave 1)
+
+
+class ParlayLegRequest(BaseModel):
+    game_external_id: str = Field(min_length=1, description="lines-service external game id")
+    market_type: str
+    side: str = Field(min_length=1)
+    line_value: float | None = None
+    sportsbook_key: str | None = None
+
+    @field_validator("market_type")
+    @classmethod
+    def _team_markets_only(cls, value: str) -> str:
+        market = value.upper()
+        if market not in ("SPREAD", "TOTAL", "MONEYLINE"):
+            raise ValueError(
+                f"market_type {value!r} is not supported in parlays yet: v1 accepts team markets only "
+                "(SPREAD, TOTAL, MONEYLINE); player props arrive in Phase 7 Wave 3"
+            )
+        return market
+
+
+class ParlayEvaluateRequest(BaseModel):
+    legs: list[ParlayLegRequest] = Field(min_length=2, max_length=6)
+    parlay_odds_american: int | None = Field(
+        default=None, description="Offered SGP price; omitted -> product of leg decimals."
+    )
+    persist: bool = Field(default=False, description="Persist the evaluation even when it misses the EV threshold.")
+
+
+class ParlayLegData(BaseModel):
+    game_external_id: str
+    game_id: str
+    market_type: str
+    selection: str
+    side: str
+    line_value: float | None
+    sportsbook_key: str
+    odds_american: int
+    odds_decimal: float
+    predicted_probability: float
+    sim_leg_key: str | None = None
+
+
+class ParlayEvaluationData(BaseModel):
+    parlay_id: str | None
+    league: str
+    legs: list[ParlayLegData]
+    is_same_game: bool
+    joint_probability: float
+    independent_probability: float
+    correlation_edge: float
+    combined_odds_american: int
+    combined_odds_decimal: float
+    expected_value: float
+    ev_pct: float
+    kelly_fraction: float
+    recommended_stake: float
+    meets_threshold: bool
+    method: str
+    correlations: dict[str, float]
+    expires_at: str
 
 
 class EdgeGameTeam(BaseModel):

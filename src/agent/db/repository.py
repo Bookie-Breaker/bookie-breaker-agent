@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from agent.api.pagination import Cursor
-from agent.db.tables import analyses, edge_alerts, edges, pipeline_runs, pipeline_schedules
+from agent.db.tables import analyses, edge_alerts, edges, parlay_legs, parlays, pipeline_runs, pipeline_schedules
 
 ACTIVE_RUN_STATUSES = ("QUEUED", "RUNNING")
 
@@ -294,6 +294,40 @@ class EdgeRepository:
         async with self._engine.begin() as conn:
             await conn.execute(update(edges).where(edges.c.id == edge_id).values(paper_bet_id=paper_bet_id))
 
+    async def game_id_for_external(self, game_external_id: str) -> uuid.UUID | None:
+        """Statistics-service game UUID for a lines-service external id.
+
+        Edges carry both id spaces, so the newest edge row for the external
+        id reverses the pipeline's reconciliation mapping.
+        """
+        stmt = (
+            select(edges.c.game_id)
+            .where(edges.c.game_external_id == game_external_id)
+            .order_by(edges.c.detected_at.desc())
+            .limit(1)
+        )
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(stmt)).one_or_none()
+        return row.game_id if row is not None else None
+
+    async def active_for_game_external(self, game_external_id: str, now: datetime | None = None) -> list[EdgeRecord]:
+        """Fresh, unexpired edges for a game by its lines-service external id."""
+        now = now or datetime.now(tz=UTC)
+        stmt = (
+            select(edges)
+            .where(
+                and_(
+                    edges.c.game_external_id == game_external_id,
+                    edges.c.is_stale.is_(False),
+                    edges.c.expires_at > now,
+                )
+            )
+            .order_by(edges.c.detected_at.desc())
+        )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).fetchall()
+        return [_edge_from_row(row) for row in rows]
+
     async def leagues_for_game_externals(self, game_external_ids: list[str]) -> list[str]:
         """Distinct leagues that have fresh edges on any of the given games."""
         if not game_external_ids:
@@ -572,6 +606,139 @@ class ScheduleRepository:
         async with self._engine.connect() as conn:
             value = (await conn.execute(stmt)).scalar()
         return value if isinstance(value, datetime) else None
+
+
+@dataclass(frozen=True)
+class ParlayLegRecord:
+    id: uuid.UUID
+    parlay_id: uuid.UUID
+    leg_index: int
+    game_id: uuid.UUID
+    game_external_id: str
+    league: str
+    market_type: str
+    selection: str
+    side: str | None
+    line_value: float | None
+    player_external_id: str | None
+    stat_type: str | None
+    prop_type: str | None
+    odds_american: int
+    odds_decimal: float
+    predicted_probability: float
+    prediction_id: uuid.UUID | None
+    edge_id: uuid.UUID | None
+
+
+@dataclass(frozen=True)
+class ParlayRecord:
+    id: uuid.UUID
+    pipeline_run_id: uuid.UUID | None
+    league: str
+    combined_odds_american: int
+    combined_odds_decimal: float
+    joint_probability: float
+    independent_probability: float
+    correlation_edge: float
+    expected_value: float
+    kelly_fraction: float
+    recommended_stake: float
+    confidence: float | None
+    is_same_game: bool
+    leg_count: int
+    correlations: dict[str, Any] | None
+    detected_at: datetime
+    expires_at: datetime
+    is_stale: bool
+    paper_bet_id: uuid.UUID | None
+    legs: tuple[ParlayLegRecord, ...] = ()
+
+
+def _parlay_leg_from_row(row: Row[Any]) -> ParlayLegRecord:
+    return ParlayLegRecord(
+        id=row.id,
+        parlay_id=row.parlay_id,
+        leg_index=row.leg_index,
+        game_id=row.game_id,
+        game_external_id=row.game_external_id,
+        league=row.league,
+        market_type=row.market_type,
+        selection=row.selection,
+        side=row.side,
+        line_value=float(row.line_value) if row.line_value is not None else None,
+        player_external_id=row.player_external_id,
+        stat_type=row.stat_type,
+        prop_type=row.prop_type,
+        odds_american=row.odds_american,
+        odds_decimal=float(row.odds_decimal),
+        predicted_probability=float(row.predicted_probability),
+        prediction_id=row.prediction_id,
+        edge_id=row.edge_id,
+    )
+
+
+def _parlay_from_row(row: Row[Any], legs: tuple[ParlayLegRecord, ...] = ()) -> ParlayRecord:
+    return ParlayRecord(
+        id=row.id,
+        pipeline_run_id=row.pipeline_run_id,
+        league=row.league,
+        combined_odds_american=row.combined_odds_american,
+        combined_odds_decimal=float(row.combined_odds_decimal),
+        joint_probability=float(row.joint_probability),
+        independent_probability=float(row.independent_probability),
+        correlation_edge=float(row.correlation_edge),
+        expected_value=float(row.expected_value),
+        kelly_fraction=float(row.kelly_fraction),
+        recommended_stake=float(row.recommended_stake),
+        confidence=float(row.confidence) if row.confidence is not None else None,
+        is_same_game=row.is_same_game,
+        leg_count=row.leg_count,
+        correlations=dict(row.correlations) if row.correlations is not None else None,
+        detected_at=row.detected_at,
+        expires_at=row.expires_at,
+        is_stale=row.is_stale,
+        paper_bet_id=row.paper_bet_id,
+        legs=legs,
+    )
+
+
+class ParlayRepository:
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def insert_with_legs(self, parlay_values: dict[str, Any], legs_values: list[dict[str, Any]]) -> ParlayRecord:
+        """Insert a parlay and its legs in one transaction.
+
+        legs_values omit parlay_id/leg_index; both are assigned here in
+        list order.
+        """
+        async with self._engine.begin() as conn:
+            parlay_row = (await conn.execute(insert(parlays).values(**parlay_values).returning(parlays))).one()
+            leg_records: list[ParlayLegRecord] = []
+            for index, leg in enumerate(legs_values):
+                leg_row = (
+                    await conn.execute(
+                        insert(parlay_legs)
+                        .values(parlay_id=parlay_row.id, leg_index=index, **leg)
+                        .returning(parlay_legs)
+                    )
+                ).one()
+                leg_records.append(_parlay_leg_from_row(leg_row))
+        return _parlay_from_row(parlay_row, tuple(leg_records))
+
+    async def get(self, parlay_id: uuid.UUID) -> ParlayRecord | None:
+        stmt = select(parlays).where(parlays.c.id == parlay_id)
+        legs_stmt = select(parlay_legs).where(parlay_legs.c.parlay_id == parlay_id).order_by(parlay_legs.c.leg_index)
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(stmt)).one_or_none()
+            if row is None:
+                return None
+            leg_rows = (await conn.execute(legs_stmt)).fetchall()
+        return _parlay_from_row(row, tuple(_parlay_leg_from_row(leg) for leg in leg_rows))
+
+    async def set_paper_bet(self, parlay_id: uuid.UUID, paper_bet_id: uuid.UUID) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(update(parlays).where(parlays.c.id == parlay_id).values(paper_bet_id=paper_bet_id))
 
 
 def utc_now() -> datetime:

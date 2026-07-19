@@ -9,6 +9,7 @@ from agent.clients.simulation import SimulationClient
 from agent.clients.statistics import StatisticsClient
 from agent.core.analysis import AnalysisService
 from agent.core.dashboard import DashboardService
+from agent.core.parlay import ParlayEvaluator
 from agent.core.pipeline import PipelineRunner
 from agent.core.scheduler import PipelineScheduler
 from agent.core.slate import SlateService
@@ -90,6 +91,11 @@ def get_schedule_repo(request: Request) -> ScheduleRepository:
 def get_scheduler(request: Request) -> PipelineScheduler:
     scheduler: PipelineScheduler = request.app.state.scheduler
     return scheduler
+
+
+def get_parlay_evaluator(request: Request) -> ParlayEvaluator:
+    evaluator: ParlayEvaluator = request.app.state.parlay_evaluator
+    return evaluator
 
 
 def get_llm_provider(request: Request) -> LLMProvider:
