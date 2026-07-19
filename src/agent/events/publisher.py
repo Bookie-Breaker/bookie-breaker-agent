@@ -51,6 +51,9 @@ def edge_detected_payload(edge: EdgeRecord, description: str | None = None) -> d
         "confidence": edge.confidence,
         "game_start": edge.expires_at.isoformat().replace("+00:00", "Z"),
         "priority": edge_priority(edge.confidence),
+        # Additive (Phase 7 Wave 2): true for in-game edges detected on
+        # live lines; such edges carry a short expires_at, not game start.
+        "is_live": edge.is_live,
     }
     if description is not None:
         payload["description"] = description

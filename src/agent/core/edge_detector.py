@@ -136,13 +136,16 @@ class EdgeDetector:
         lines: list[LineSnapshot],
         simulation_run_id: str | None = None,
         now: datetime | None = None,
+        mark_live: bool = False,
     ) -> list[EdgeCandidate]:
         """Detect positive-EV edges for one game.
 
         Returns one candidate per (market_type, side, line_value) at the
         best available price across books. Candidates are positive edges
         (predicted beats the de-vigged implied probability with positive
-        EV); ``meets_threshold`` marks the actionable subset.
+        EV); ``meets_threshold`` marks the actionable subset. mark_live
+        flags every built candidate is_live=True (Phase 7 Wave 2 in-game
+        detection over live lines).
         """
         now = now or datetime.now(tz=UTC)
         expires_at = _parse_datetime(game.scheduled_start)
@@ -164,7 +167,16 @@ class EdgeDetector:
                     continue
                 predicted, prediction = matched
                 candidate = self._build_candidate(
-                    game, game_external_id, line, predicted, implied, prediction, simulation_run_id, expires_at, now
+                    game,
+                    game_external_id,
+                    line,
+                    predicted,
+                    implied,
+                    prediction,
+                    simulation_run_id,
+                    expires_at,
+                    now,
+                    is_live=mark_live,
                 )
                 if candidate is None:
                     continue
@@ -262,6 +274,7 @@ class EdgeDetector:
         simulation_run_id: str | None,
         expires_at: datetime,
         now: datetime,
+        is_live: bool = False,
     ) -> EdgeCandidate | None:
         if not 0.0 < predicted < 1.0:
             return None
@@ -305,4 +318,5 @@ class EdgeDetector:
             simulation_run_id=_parse_uuid(simulation_run_id),
             expires_at=expires_at,
             meets_threshold=ev_pct >= min_ev_pct_for_league(game.league),
+            is_live=is_live,
         )

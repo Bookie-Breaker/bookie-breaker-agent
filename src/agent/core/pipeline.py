@@ -304,7 +304,9 @@ class PipelineRunner:
         return outcome
 
     @staticmethod
-    def _edge_values(run_id: uuid.UUID, candidate: EdgeCandidate, recommended_stake: float) -> dict[str, Any]:
+    def _edge_values(run_id: uuid.UUID | None, candidate: EdgeCandidate, recommended_stake: float) -> dict[str, Any]:
+        """Column values for EdgeRepository.insert. run_id is None for
+        edges persisted outside a pipeline run (live evaluations)."""
         return {
             "pipeline_run_id": run_id,
             "game_id": uuid.UUID(candidate.game_id),

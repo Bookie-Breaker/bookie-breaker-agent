@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     parlay_scan_min_edge_pct: float = 0.6  # fraction of the league min EV an edge needs to enter the scan
     parlay_auto_bet: bool = False  # let the scanner place paper parlays for meets_threshold results
 
+    # Live edges (Phase 7 Wave 2). Off by default: is_live lines.updated
+    # events trigger a trimmed per-game re-evaluation behind an aggressive
+    # per-game debounce (sub-second live frames must coalesce).
+    live_edges_enabled: bool = False
+    live_debounce_seconds: float = 5.0  # per-game coalesce window for live line bursts
+    live_edge_ttl_seconds: int = 120  # live edges expire fast: in-game prices move constantly
+
     llm_provider: str = "anthropic"  # anthropic | ollama (ADR-011: config-only switch)
     anthropic_api_key: str | None = None
     llm_base_url: str | None = None  # None -> provider default (api.anthropic.com / http://ollama:11434)
