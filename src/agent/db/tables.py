@@ -20,6 +20,7 @@ from sqlalchemy import (
     Numeric,
     Table,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects import postgresql
@@ -107,9 +108,17 @@ edges = Table(
     Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
     Column("is_stale", Boolean, nullable=False, server_default=text("FALSE")),
     Column("paper_bet_id", UUID(as_uuid=True)),
-    # DRAW is only valid on MONEYLINE markets (ADR-027); enforced by
-    # detection logic, the constraint keeps the side vocabulary closed.
-    CheckConstraint("side IS NULL OR side IN ('HOME', 'AWAY', 'DRAW', 'OVER', 'UNDER')", name="chk_edges_side"),
+    # Player-prop metadata (Phase 7 Wave 0); NULL for non-prop edges.
+    Column("player_external_id", Text),
+    Column("stat_type", Text),
+    Column("prop_type", Text),
+    Column("is_live", Boolean, nullable=False, server_default=text("FALSE")),
+    # DRAW is only valid on MONEYLINE markets (ADR-027); YES/NO cover
+    # player-prop markets (Phase 7). Enforced by detection logic, the
+    # constraint keeps the side vocabulary closed.
+    CheckConstraint(
+        "side IS NULL OR side IN ('HOME', 'AWAY', 'DRAW', 'OVER', 'UNDER', 'YES', 'NO')", name="chk_edges_side"
+    ),
     CheckConstraint(
         "predicted_probability > 0 AND predicted_probability < 1",
         name="chk_edges_predicted_probability_range",
@@ -161,6 +170,70 @@ edge_alerts = Table(
     CheckConstraint("channel IN ('redis')", name="chk_edge_alerts_channel"),
     CheckConstraint("priority IN ('LOW', 'MEDIUM', 'HIGH')", name="chk_edge_alerts_priority"),
     Index("idx_edge_alerts_delivery", "channel", "priority", text("delivered_at DESC")),
+)
+
+parlays = Table(
+    "parlays",
+    metadata,
+    _uuid_pk(),
+    Column("pipeline_run_id", UUID(as_uuid=True), ForeignKey("pipeline_runs.id")),
+    Column("league", _enum("league_enum"), nullable=False),
+    Column("combined_odds_american", Integer, nullable=False),
+    Column("combined_odds_decimal", Numeric(10, 4), nullable=False),
+    Column("joint_probability", Numeric(6, 5), nullable=False),
+    Column("independent_probability", Numeric(6, 5), nullable=False),
+    Column("correlation_edge", Numeric(7, 5), nullable=False),
+    Column("expected_value", Numeric(7, 5), nullable=False),
+    Column("kelly_fraction", Numeric(6, 5), nullable=False),
+    Column("recommended_stake", Numeric(8, 2), nullable=False),
+    Column("confidence", Numeric(6, 5)),
+    Column("is_same_game", Boolean, nullable=False, server_default=text("FALSE")),
+    Column("leg_count", Integer, nullable=False),
+    Column("correlations", JSONB),
+    Column("detected_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("NOW()")),
+    Column("expires_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("is_stale", Boolean, nullable=False, server_default=text("FALSE")),
+    Column("paper_bet_id", UUID(as_uuid=True)),
+    CheckConstraint(
+        "joint_probability > 0 AND joint_probability < 1",
+        name="chk_parlays_joint_probability_range",
+    ),
+    CheckConstraint(
+        "independent_probability > 0 AND independent_probability < 1",
+        name="chk_parlays_independent_probability_range",
+    ),
+    CheckConstraint("leg_count >= 2", name="chk_parlays_leg_count"),
+    Index("idx_parlays_fresh", text("detected_at DESC"), postgresql_where=text("is_stale = FALSE")),
+    Index("idx_parlays_league", "league", text("detected_at DESC")),
+)
+
+parlay_legs = Table(
+    "parlay_legs",
+    metadata,
+    _uuid_pk(),
+    Column("parlay_id", UUID(as_uuid=True), ForeignKey("parlays.id", ondelete="CASCADE"), nullable=False),
+    Column("leg_index", Integer, nullable=False),
+    Column("game_id", UUID(as_uuid=True), nullable=False),
+    Column("game_external_id", Text, nullable=False),
+    Column("league", _enum("league_enum"), nullable=False),
+    Column("market_type", _enum("market_type_enum"), nullable=False),
+    Column("selection", Text, nullable=False),
+    Column("side", Text),
+    Column("line_value", Numeric(8, 2)),
+    Column("player_external_id", Text),
+    Column("stat_type", Text),
+    Column("prop_type", Text),
+    Column("odds_american", Integer, nullable=False),
+    Column("odds_decimal", Numeric(8, 4), nullable=False),
+    Column("predicted_probability", Numeric(6, 5), nullable=False),
+    Column("prediction_id", UUID(as_uuid=True)),
+    Column("edge_id", UUID(as_uuid=True), ForeignKey("edges.id")),
+    CheckConstraint(
+        "side IS NULL OR side IN ('HOME', 'AWAY', 'DRAW', 'OVER', 'UNDER', 'YES', 'NO')",
+        name="chk_parlay_legs_side",
+    ),
+    UniqueConstraint("parlay_id", "leg_index", name="uq_parlay_legs_parlay_leg_index"),
+    Index("idx_parlay_legs_parlay", "parlay_id"),
 )
 
 pipeline_schedules = Table(

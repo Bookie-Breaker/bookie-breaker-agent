@@ -80,6 +80,11 @@ class EdgeCandidate:
     simulation_run_id: str | None
     expires_at: datetime
     meets_threshold: bool
+    # Player-prop metadata (Phase 7 Wave 0); None/False for non-prop edges.
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
+    is_live: bool = False
 
 
 def _normalize(text: str) -> str:

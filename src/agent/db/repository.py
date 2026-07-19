@@ -59,6 +59,11 @@ class EdgeRecord:
     expires_at: datetime
     is_stale: bool
     paper_bet_id: uuid.UUID | None
+    # Player-prop metadata (Phase 7 Wave 0); None/False for non-prop edges.
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
+    is_live: bool = False
 
 
 def _run_from_row(row: Row[Any]) -> PipelineRunRecord:
@@ -105,6 +110,10 @@ def _edge_from_row(row: Row[Any]) -> EdgeRecord:
         expires_at=row.expires_at,
         is_stale=row.is_stale,
         paper_bet_id=row.paper_bet_id,
+        player_external_id=row.player_external_id,
+        stat_type=row.stat_type,
+        prop_type=row.prop_type,
+        is_live=row.is_live,
     )
 
 
