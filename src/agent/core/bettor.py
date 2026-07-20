@@ -182,6 +182,13 @@ class AutoBettor:
             "stake": stake,
             "kelly_fraction": kelly_used,
             "reasoning": self._reasoning(edge),
+            # Prop identity (Phase 7 Wave 3, None for team markets):
+            # player_external_id is the ADR-029 NAME SLUG -- the emulator
+            # grades props by slug, never by the engine-internal player UUID
+            # (edges store the slug; see core/props.py).
+            "player_external_id": edge.player_external_id,
+            "stat_type": edge.stat_type,
+            "prop_type": edge.prop_type,
         }
         bet = await self._emulator.place_bet(body, idempotency_key=str(idempotency_key(edge)))
         await self._edge_repo.set_paper_bet(edge.id, uuid.UUID(bet.id))

@@ -78,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             devig_method=settings.devig_method,
             kelly_multiplier=settings.kelly_multiplier,
             max_bet_pct=settings.max_bet_pct,
+            single_sided_vig_haircut=settings.single_sided_vig_haircut,
         )
         bettor = AutoBettor(
             emulator, edge_repo, max_total_exposure=settings.max_total_exposure, parlay_repo=parlay_repo
@@ -127,6 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             redis_client,
             concurrency=settings.pipeline_concurrency,
             parlay_scanner=parlay_scanner if settings.parlay_scan_enabled else None,
+            prop_edges_leagues=settings.prop_edges_leagues,
         )
         summary_service = DailySummaryService(edge_repo, emulator, llm, analysis_repo)
         scheduler = PipelineScheduler(schedule_repo, runner, summary_service, settings)

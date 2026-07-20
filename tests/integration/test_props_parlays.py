@@ -71,7 +71,12 @@ class TestMigration0007Cycle:
     def test_downgrade_and_reapply(self, migrated_database_url: str) -> None:
         """0007 downgrades to 0006 and re-applies cleanly (fresh run)."""
         # Downgrade restores the pre-0007 side vocabulary; YES/NO rows from
-        # other tests in this module would violate the recreated constraint.
+        # other tests (and their alert rows, which FK the edges) would
+        # violate the recreated constraint.
+        execute_sql(
+            migrated_database_url,
+            "DELETE FROM agent.edge_alerts WHERE edge_id IN (SELECT id FROM agent.edges WHERE side IN ('YES', 'NO'))",
+        )
         execute_sql(migrated_database_url, "DELETE FROM agent.edges WHERE side IN ('YES', 'NO')")
         config = Config("alembic.ini")
         command.downgrade(config, "0006")
