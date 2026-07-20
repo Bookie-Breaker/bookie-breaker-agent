@@ -26,7 +26,9 @@ coverage.xml
 
 # IDE
 .idea/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
 *.swp
 *.swo
 *~
@@ -34,3 +36,6 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+
+# graphify local knowledge graph (rebuilt by dev-env-setup / post-commit hook)
+graphify-out/
