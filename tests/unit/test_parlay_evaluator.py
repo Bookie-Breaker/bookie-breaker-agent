@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from agent.api.errors import ApiError, DependencyError, UnprocessableError
-from agent.clients.simulation import CorrelationsData, SimulationRun
+from agent.api.errors import ApiError, DependencyError, NotFoundError, UnprocessableError
+from agent.clients.simulation import CorrelationsData, PlayerDistributions, SimulationRun
 from agent.clients.statistics import Game
 from agent.core.bettor import AutoBettor
 from agent.core.parlay import ParlayEvaluator, ParlayLegSpec
@@ -38,11 +38,24 @@ class FakeStatistics:
 
 
 class FakePrediction:
-    def __init__(self, by_game: dict[str, list[Any]]) -> None:
+    def __init__(self, by_game: dict[str, list[Any]], on_demand: dict[str, list[Any]] | None = None) -> None:
         self.by_game = by_game
+        # game_id -> rows returned by an on-demand create_predictions call
+        self.on_demand = on_demand or {}
+        self.created: list[tuple[str, str, list[str] | None, list[dict[str, Any]] | None]] = []
 
     async def latest_for_game(self, game_id: str, market_type: str | None = None) -> list[Any]:
         return self.by_game[game_id]
+
+    async def create_predictions(
+        self,
+        game_id: str,
+        simulation_run_id: str,
+        market_types: list[str] | None = None,
+        props: list[dict[str, Any]] | None = None,
+    ) -> list[Any]:
+        self.created.append((game_id, simulation_run_id, market_types, props))
+        return self.on_demand.get(game_id, [])
 
 
 class FakeLines:
@@ -67,21 +80,40 @@ class FakeLines:
 
 
 class FakeSimulation:
-    def __init__(self, correlations: CorrelationsData | None = None, fail: bool = False) -> None:
+    def __init__(
+        self,
+        correlations: CorrelationsData | None = None,
+        fail: bool = False,
+        player_distributions: PlayerDistributions | None = None,
+        correlations_error: Exception | None = None,
+    ) -> None:
         self.correlations = correlations
         self.fail = fail
+        self.player_distributions = player_distributions
+        # e.g. UnprocessableError: the sim 422s player legs on a run
+        # without player capture (Wave 4 fallback path)
+        self.correlations_error = correlations_error
         self.requested_legs: list[str] | None = None
+        self.run_id = str(uuid.uuid4())
 
     async def latest_for_game(self, game_id: str) -> SimulationRun:
         if self.fail:
             raise DependencyError("simulation-engine is unavailable")
-        return SimulationRun(simulation_run_id=str(uuid.uuid4()), game_id=game_id)
+        return SimulationRun(simulation_run_id=self.run_id, game_id=game_id)
 
     async def get_correlations(self, simulation_run_id: str, legs: list[str] | None = None) -> CorrelationsData:
+        if self.correlations_error is not None:
+            self.requested_legs = legs
+            raise self.correlations_error
         if self.fail or self.correlations is None:
             raise DependencyError("simulation-engine is unavailable")
         self.requested_legs = legs
         return self.correlations
+
+    async def get_player_distributions(self, simulation_run_id: str) -> PlayerDistributions:
+        if self.fail or self.player_distributions is None:
+            raise NotFoundError(f"no player distributions for simulation {simulation_run_id}")
+        return self.player_distributions
 
 
 class FakeParlayRepo:
@@ -103,9 +135,9 @@ class FakeParlayRepo:
                 selection=leg["selection"],
                 side=leg["side"],
                 line_value=leg["line_value"],
-                player_external_id=None,
-                stat_type=None,
-                prop_type=None,
+                player_external_id=leg.get("player_external_id"),
+                stat_type=leg.get("stat_type"),
+                prop_type=leg.get("prop_type"),
                 odds_american=leg["odds_american"],
                 odds_decimal=leg["odds_decimal"],
                 predicted_probability=leg["predicted_probability"],
@@ -143,6 +175,7 @@ def build_evaluator(
     games: dict[str, tuple[uuid.UUID, Game]],
     predictions: dict[str, list[Any]],
     lines: dict[str, list[Any]],
+    prediction_client: FakePrediction | None = None,
 ) -> tuple[ParlayEvaluator, FakeParlayRepo, FakeRedis]:
     edge_repo = FakeEdgeRepo({ext: game_id for ext, (game_id, _) in games.items()})
     statistics = FakeStatistics({str(game_id): game for game_id, game in games.values()})
@@ -154,7 +187,7 @@ def build_evaluator(
         parlay_repo,  # type: ignore[arg-type]
         statistics,  # type: ignore[arg-type]
         FakeLines(lines),  # type: ignore[arg-type]
-        FakePrediction(predictions),  # type: ignore[arg-type]
+        prediction_client or FakePrediction(predictions),  # type: ignore[arg-type]
         simulation,  # type: ignore[arg-type]
         None,  # type: ignore[arg-type] - reconciler unused when the edges table resolves
         bettor,
@@ -322,16 +355,17 @@ class TestValidationGuards:
                 ]
             )
 
-    async def test_prop_markets_rejected(self) -> None:
+    async def test_team_and_game_prop_markets_rejected(self) -> None:
         games, predictions, lines = same_game_setup()
         evaluator, _, _ = build_evaluator(FakeSimulation(fail=True), games, predictions, lines)
-        with pytest.raises(UnprocessableError, match="Wave 3"):
-            await evaluator.evaluate(
-                [
-                    ParlayLegSpec(game_external_id=GAME_A_EXT, market_type="MONEYLINE", side="HOME"),
-                    ParlayLegSpec(game_external_id=GAME_A_EXT, market_type="PLAYER_PROP", side="OVER"),
-                ]
-            )
+        for market in ("TEAM_PROP", "GAME_PROP"):
+            with pytest.raises(UnprocessableError, match="not supported"):
+                await evaluator.evaluate(
+                    [
+                        ParlayLegSpec(game_external_id=GAME_A_EXT, market_type="MONEYLINE", side="HOME"),
+                        ParlayLegSpec(game_external_id=GAME_A_EXT, market_type=market, side="OVER"),
+                    ]
+                )
 
     async def test_leg_count_bounds(self) -> None:
         games, predictions, lines = same_game_setup()

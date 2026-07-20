@@ -252,20 +252,21 @@ class TestEvaluateGating:
 
 
 class TestEvaluateValidation:
-    def test_prop_leg_rejected_with_wave3_message(self, client) -> None:
+    def test_team_prop_leg_rejected(self, client) -> None:
+        # PLAYER_PROP legs are allowed since Wave 4; TEAM_PROP/GAME_PROP
+        # remain rejected (no simulation leg vocabulary for them).
         response = client.post(
             "/api/v1/agent/parlays/evaluate",
             json={
                 "legs": [
                     {"game_external_id": "ext-x", "market_type": "MONEYLINE", "side": "HOME"},
-                    {"game_external_id": "ext-x", "market_type": "PLAYER_PROP", "side": "OVER"},
+                    {"game_external_id": "ext-x", "market_type": "TEAM_PROP", "side": "OVER"},
                 ]
             },
         )
         assert response.status_code == 400
         body = response.json()
         assert body["error"]["code"] == "VALIDATION_ERROR"
-        assert any("Wave 3" in err["msg"] for err in body["error"]["details"]["errors"])
 
     def test_single_leg_rejected(self, client) -> None:
         response = client.post(

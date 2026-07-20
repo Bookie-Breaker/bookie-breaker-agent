@@ -61,6 +61,10 @@ class BridgedPlayer:
     # payload did not enumerate stats, in which case no availability
     # filtering is applied.
     stat_types: frozenset[str]
+    # HOME/AWAY side the player plays for (Phase 7 Wave 4): feeds the
+    # team-agreement sign in the parlay correlation-prior fallback. Empty
+    # when the distributions payload predates the field.
+    team_side: str = ""
 
 
 class PlayerBridge:
@@ -101,6 +105,7 @@ def build_player_bridge(distributions: PlayerDistributions) -> PlayerBridge:
             name=entry.name,
             slug=slug,
             stat_types=frozenset(key.lower() for key in entry.stats),
+            team_side=entry.team.upper(),
         )
     return PlayerBridge(players)
 

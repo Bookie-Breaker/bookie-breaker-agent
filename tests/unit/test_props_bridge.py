@@ -25,6 +25,7 @@ def make_bridge() -> PlayerBridge:
             players={
                 MBAPPE_UUID: PlayerDistributionEntry(
                     name="Kylian Mbappé",
+                    team="HOME",
                     stats={"player_shots": {"mean": 3.1}, "player_goal_scorer_anytime": {"p_yes": 0.55}},
                 ),
                 RAMIREZ_UUID: PlayerDistributionEntry(name="José Ramírez", stats={}),
@@ -76,6 +77,15 @@ class TestBuildPlayerBridge:
         bridge = make_bridge()
         assert bridge.slug_for_uuid(RAMIREZ_UUID) == "jose-ramirez"
         assert bridge.slug_for_uuid(str(uuid.uuid4())) is None
+
+    def test_team_side_carried_and_defaults_empty(self) -> None:
+        # Wave 4: the payload's team (HOME/AWAY) feeds the parlay
+        # prior-fallback sign; older payloads without it yield "".
+        bridge = make_bridge()
+        mbappe = bridge.resolve("kylian-mbappe")
+        ramirez = bridge.resolve("jose-ramirez")
+        assert mbappe is not None and mbappe.team_side == "HOME"
+        assert ramirez is not None and ramirez.team_side == ""
 
     def test_unknown_slug_unresolved(self) -> None:
         assert make_bridge().resolve("harry-kane") is None

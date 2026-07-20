@@ -245,3 +245,8 @@ class FakeEmulator:
         self._maybe_fail()
         self.placed.append((body, idempotency_key))
         return PaperBet(id=str(uuid.uuid4()), game_id=str(body.get("game_id")), stake=float(body["stake"]))
+
+    async def place_parlay(self, body: dict[str, Any], idempotency_key: str) -> PaperBet:
+        self._maybe_fail()
+        self.placed.append((body, idempotency_key))
+        return PaperBet(id=str(uuid.uuid4()), game_id="", stake=float(body["stake"]))

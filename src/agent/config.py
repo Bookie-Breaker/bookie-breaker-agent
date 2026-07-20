@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     parlay_scan_enabled: bool = False  # run the same-game parlay scan after edge detection
     parlay_scan_min_edge_pct: float = 0.6  # fraction of the league min EV an edge needs to enter the scan
     parlay_auto_bet: bool = False  # let the scanner place paper parlays for meets_threshold results
+    # Player-prop parlay legs (Phase 7 Wave 4): admit PLAYER_PROP edges as
+    # scanner candidate legs (max 2 prop legs per combo). The evaluate API
+    # accepts prop legs regardless of this flag.
+    parlay_scan_include_props: bool = False
 
     # Player-prop edges (Phase 7 Wave 3). The prop step (simulate with
     # include_player_props, bridge slugs to engine UUIDs, request

@@ -2,8 +2,10 @@
 
 import uuid
 from datetime import timedelta
+from typing import Any
 
-from agent.core.bettor import AutoBettor, candidate_key, idempotency_key
+from agent.core.bettor import AutoBettor, candidate_key, idempotency_key, parlay_identity
+from agent.core.parlay import EvaluatedLeg, ParlayEvaluation
 from tests.unit.factories import FakeEdgeRepo, FakeEmulator, make_candidate, make_edge_record, utc_now
 
 
@@ -182,3 +184,104 @@ class TestPlaceBet:
         bankroll_units, open_exposure = await bettor.fetch_bankroll()
         assert bankroll_units == 100.0
         assert open_exposure == 0.0
+
+
+def make_evaluated_leg(**overrides: Any) -> EvaluatedLeg:
+    defaults: dict[str, Any] = {
+        "game_external_id": "ext-game-1",
+        "game_id": str(uuid.uuid4()),
+        "league": "EPL",
+        "market_type": "MONEYLINE",
+        "selection": "Arsenal",
+        "side": "HOME",
+        "line_value": None,
+        "sportsbook_key": "draftkings",
+        "odds_american": 100,
+        "odds_decimal": 2.0,
+        "predicted_probability": 0.55,
+        "prediction_id": str(uuid.uuid4()),
+        "sim_leg_key": "MONEYLINE:HOME",
+    }
+    defaults.update(overrides)
+    return EvaluatedLeg(**defaults)
+
+
+def make_prop_leg(slug: str = "bukayo-saka", odds_american: int = 200) -> EvaluatedLeg:
+    return make_evaluated_leg(
+        market_type="PLAYER_PROP",
+        selection=f"{slug} Anytime Goalscorer",
+        side="YES",
+        odds_american=odds_american,
+        odds_decimal=3.0,
+        predicted_probability=0.35,
+        sim_leg_key=f"PLAYER_PROP:{uuid.uuid4()}:player_goal_scorer_anytime:YES",
+        player_external_id=slug,
+        stat_type="player_goal_scorer_anytime",
+        prop_type="YES_NO",
+        player_team="HOME",
+    )
+
+
+def make_evaluation(*legs: EvaluatedLeg, **overrides: Any) -> ParlayEvaluation:
+    defaults: dict[str, Any] = {
+        "parlay_id": str(uuid.uuid4()),
+        "league": "EPL",
+        "legs": tuple(legs),
+        "is_same_game": True,
+        "joint_probability": 0.24,
+        "independent_probability": 0.1925,
+        "correlation_edge": 0.0475,
+        "combined_odds_american": 500,
+        "combined_odds_decimal": 6.0,
+        "expected_value": 0.44,
+        "ev_pct": 44.0,
+        "kelly_fraction": 0.02,
+        "recommended_stake": 2.0,
+        "meets_threshold": True,
+        "method": "simulation_scaled",
+        "correlations": {"0-1": 0.22},
+        "expires_at": utc_now() + timedelta(hours=3),
+    }
+    defaults.update(overrides)
+    return ParlayEvaluation(**defaults)
+
+
+class TestPlaceParlay:
+    async def test_prop_leg_bodies_carry_slug_identity(self) -> None:
+        emulator = FakeEmulator()
+        bettor = make_bettor(emulator, FakeEdgeRepo())
+        evaluation = make_evaluation(make_evaluated_leg(), make_prop_leg())
+
+        bet_id = await bettor.place_parlay(evaluation)
+
+        assert bet_id is not None
+        body, _ = emulator.placed[0]
+        team_leg, prop_leg = body["legs"]
+        assert team_leg["player_external_id"] is None
+        assert team_leg["stat_type"] is None
+        assert team_leg["prop_type"] is None
+        assert prop_leg["market_type"] == "PLAYER_PROP"
+        assert prop_leg["player_external_id"] == "bukayo-saka"  # ADR-029 slug
+        assert prop_leg["stat_type"] == "player_goal_scorer_anytime"
+        assert prop_leg["prop_type"] == "YES_NO"
+        assert prop_leg["side"] == "YES"
+        assert prop_leg["line_value"] is None
+
+    async def test_parlay_identity_distinguishes_players(self) -> None:
+        # Two different players' props with identical pricing must produce
+        # different idempotency identities.
+        base = make_evaluated_leg()
+        eval_a = make_evaluation(base, make_prop_leg(slug="bukayo-saka"))
+        eval_b = make_evaluation(base, make_prop_leg(slug="cole-palmer"))
+        assert parlay_identity(eval_a) != parlay_identity(eval_b)
+
+    async def test_team_leg_identity_unchanged_from_wave1(self) -> None:
+        leg = make_evaluated_leg()
+        identity = parlay_identity(
+            make_evaluation(
+                leg, make_evaluated_leg(market_type="TOTAL", side="OVER", line_value=2.5, sim_leg_key="TOTAL:OVER:2.5")
+            )
+        )
+        # team legs never grow the prop suffix (stable idempotency keys)
+        for part in identity.split("|")[1:]:
+            assert part.count(":") == 5

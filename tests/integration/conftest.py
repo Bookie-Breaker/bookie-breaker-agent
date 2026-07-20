@@ -282,8 +282,11 @@ def line(
     side: str,
     odds_american: int,
     line_value: float | None = None,
+    player_external_id: str | None = None,
+    stat_type: str | None = None,
+    prop_type: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "id": str(uuid.uuid4()),
         "game_id": game_external_id,
         "sportsbook_id": str(uuid.uuid4()),
@@ -299,6 +302,12 @@ def line(
         "is_opening": False,
         "is_closing": False,
     }
+    if player_external_id is not None:
+        # Player-prop identity (ADR-029 name slug on lines-service payloads)
+        payload["player_external_id"] = player_external_id
+        payload["stat_type"] = stat_type
+        payload["prop_type"] = prop_type
+    return payload
 
 
 def game_lines_payload(game_external_id: str) -> list[dict[str, Any]]:

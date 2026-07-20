@@ -21,7 +21,7 @@ from agent.db.repository import EdgeRecord, EdgeRepository, ParlayRepository
 from agent.edges import BetSizing, scale_simultaneous_bets, should_bet_now
 
 if TYPE_CHECKING:
-    from agent.core.parlay import ParlayEvaluation
+    from agent.core.parlay import EvaluatedLeg, ParlayEvaluation
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +46,23 @@ def idempotency_key(edge: "EdgeCandidate | EdgeRecord") -> uuid.UUID:
 
 
 def parlay_identity(evaluation: "ParlayEvaluation") -> str:
-    """Order-independent identity for a parlay (sorted leg identities)."""
-    legs = sorted(
-        f"{leg.game_external_id}:{leg.market_type}:{leg.side}:{leg.line_value}:{leg.sportsbook_key}:{leg.odds_american}"
-        for leg in evaluation.legs
-    )
-    return "parlay|" + "|".join(legs)
+    """Order-independent identity for a parlay (sorted leg identities).
+
+    Team-leg identities are unchanged from Wave 1 (stable idempotency keys
+    across releases); PLAYER_PROP legs append the slug + stat so two
+    different players' props in one game never collide.
+    """
+
+    def leg_identity(leg: "EvaluatedLeg") -> str:
+        base = (
+            f"{leg.game_external_id}:{leg.market_type}:{leg.side}"
+            f":{leg.line_value}:{leg.sportsbook_key}:{leg.odds_american}"
+        )
+        if leg.player_external_id:
+            return f"{base}:{leg.player_external_id}:{leg.stat_type}"
+        return base
+
+    return "parlay|" + "|".join(sorted(leg_identity(leg) for leg in evaluation.legs))
 
 
 def parlay_idempotency_key(evaluation: "ParlayEvaluation") -> uuid.UUID:
@@ -215,6 +226,12 @@ class AutoBettor:
                     "side": leg.side,
                     "line_value": leg.line_value,
                     "sportsbook_key": leg.sportsbook_key,
+                    # Prop identity (Phase 7 Wave 4, None for team legs):
+                    # player_external_id is the ADR-029 NAME SLUG -- the
+                    # emulator grades prop legs by slug, matching singles.
+                    "player_external_id": leg.player_external_id,
+                    "stat_type": leg.stat_type,
+                    "prop_type": leg.prop_type,
                 }
                 for leg in evaluation.legs
             ],

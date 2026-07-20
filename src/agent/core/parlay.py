@@ -7,8 +7,14 @@ calibrated marginals) and fall back to the documented correlation priors
 with the first-order approximation when the simulation is unavailable;
 distinct games multiply as independent.
 
-v1 scope: 2-6 legs, team markets only (SPREAD/TOTAL/MONEYLINE; props come
-in Wave 3), all legs in one league (the EV threshold is per-league).
+Scope: 2-6 legs, all in one league (the EV threshold is per-league).
+Team markets (SPREAD/TOTAL/MONEYLINE) since Wave 1; PLAYER_PROP legs since
+Phase 7 Wave 4 -- the classic correlated SGP (result + anytime goalscorer +
+over). Prop legs carry the ADR-029 name slug in ``player_external_id``
+(see core/props.py); the slug is bridged to the engine player UUID through
+the simulation run's player distributions for prediction requests and for
+the sim leg keys (``PLAYER_PROP:{player_uuid}:{stat}:{side}[:{line}]``).
+TEAM_PROP/GAME_PROP legs remain unsupported (no sim leg vocabulary).
 
 Persistence: evaluations are persisted to agent.parlays/parlay_legs when
 they meet the league EV threshold or when the caller sets persist=True;
@@ -32,7 +38,8 @@ from agent.clients.reconcile import GameReconciler
 from agent.clients.simulation import SimulationClient
 from agent.clients.statistics import Game, StatisticsClient
 from agent.core.bettor import AutoBettor
-from agent.core.edge_detector import _parse_datetime
+from agent.core.edge_detector import _is_prop_market, _parse_datetime, _prop_prediction_key
+from agent.core.props import PLAYER_PROP_MARKET, PlayerBridge, build_player_bridge, rewrite_predictions_to_slugs
 from agent.db.repository import EdgeRepository, ParlayRecord, ParlayRepository
 from agent.edges import (
     american_to_decimal,
@@ -49,12 +56,25 @@ logger = logging.getLogger(__name__)
 
 MIN_LEGS = 2
 MAX_LEGS = 6
-ALLOWED_MARKETS = ("SPREAD", "TOTAL", "MONEYLINE")
+ALLOWED_MARKETS = ("SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP")
+# Prop markets without a simulation leg vocabulary: still rejected.
+UNSUPPORTED_PROP_MARKETS = ("TEAM_PROP", "GAME_PROP")
 _SIDES_BY_MARKET = {
     "MONEYLINE": frozenset({"HOME", "AWAY", "DRAW"}),
     "SPREAD": frozenset({"HOME", "AWAY"}),
     "TOTAL": frozenset({"OVER", "UNDER"}),
+    "PLAYER_PROP": frozenset({"OVER", "UNDER", "YES", "NO"}),
 }
+
+PROP_TYPE_OVER_UNDER = "OVER_UNDER"
+PROP_TYPE_YES_NO = "YES_NO"
+_PROP_TYPE_BY_SIDE = {
+    "OVER": PROP_TYPE_OVER_UNDER,
+    "UNDER": PROP_TYPE_OVER_UNDER,
+    "YES": PROP_TYPE_YES_NO,
+    "NO": PROP_TYPE_YES_NO,
+}
+_PROP_COMPLEMENTS = {"OVER": "UNDER", "UNDER": "OVER", "YES": "NO", "NO": "YES"}
 
 METHOD_INDEPENDENT = "independent"
 METHOD_SIMULATION = "simulation_scaled"
@@ -64,7 +84,13 @@ METHOD_MIXED = "mixed"
 
 @dataclass(frozen=True)
 class ParlayLegSpec:
-    """One requested parlay leg, keyed by lines-service ids."""
+    """One requested parlay leg, keyed by lines-service ids.
+
+    PLAYER_PROP legs (Phase 7 Wave 4) additionally carry the prop identity:
+    ``player_external_id`` is the ADR-029 name slug (never the engine
+    player UUID), ``stat_type`` the canonical stat key, and ``prop_type``
+    OVER_UNDER or YES_NO (inferred from the side when omitted).
+    """
 
     game_external_id: str
     market_type: str
@@ -72,6 +98,9 @@ class ParlayLegSpec:
     line_value: float | None = None
     sportsbook_key: str | None = None
     edge_id: str | None = None  # set by the scanner; links the leg row back
+    player_external_id: str | None = None  # ADR-029 name slug
+    stat_type: str | None = None
+    prop_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +119,14 @@ class EvaluatedLeg:
     prediction_id: str | None
     sim_leg_key: str
     edge_id: str | None = None
+    # Prop identity (Phase 7 Wave 4); None for team-market legs. The slug
+    # convention matches Wave 3's edges rows (core/props.py).
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
+    # HOME/AWAY side the player plays for (from the sim player
+    # distributions); feeds the prior-fallback sign, never persisted.
+    player_team: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +151,7 @@ class ParlayEvaluation:
 
 
 def sim_leg_key(market_type: str, side: str, line_value: float | None) -> str:
-    """Canonical simulation-engine leg key (see clients/simulation.py)."""
+    """Canonical simulation-engine leg key for a team market."""
     market = market_type.upper()
     if market == "MONEYLINE":
         return f"MONEYLINE:{side.upper()}"
@@ -123,38 +160,95 @@ def sim_leg_key(market_type: str, side: str, line_value: float | None) -> str:
     return f"{market}:{side.upper()}:{line_value:g}"
 
 
+def prop_sim_leg_key(player_uuid: str, stat_type: str, side: str, line_value: float | None) -> str:
+    """Canonical simulation-engine leg key for a player prop (Wave 4).
+
+    The sim's stored vocabulary is ``PLAYER_PROP:{uuid}:{stat}:OVER:{line}``
+    (%g half-lines) and ``PLAYER_PROP:{uuid}:{stat}:YES``; UNDER/NO keys
+    resolve sim-side as complements of the stored OVER/YES marginals.
+    """
+    stat = stat_type.lower()
+    side = side.upper()
+    if side in ("YES", "NO"):
+        return f"{PLAYER_PROP_MARKET}:{player_uuid}:{stat}:{side}"
+    if line_value is None:
+        raise UnprocessableError("OVER/UNDER player-prop legs require a line_value")
+    return f"{PLAYER_PROP_MARKET}:{player_uuid}:{stat}:{side}:{line_value:g}"
+
+
+def _normalized_prop_type(spec: ParlayLegSpec) -> str:
+    """OVER_UNDER or YES_NO, inferred from the side; 422 on a mismatch."""
+    inferred = _PROP_TYPE_BY_SIDE[spec.side.upper()]
+    if spec.prop_type and spec.prop_type.upper() != inferred:
+        raise UnprocessableError(
+            f"side {spec.side!r} does not match prop_type {spec.prop_type!r} "
+            f"(OVER/UNDER sides are {PROP_TYPE_OVER_UNDER}; YES/NO sides are {PROP_TYPE_YES_NO})"
+        )
+    return inferred
+
+
 def _validate_leg(spec: ParlayLegSpec) -> None:
     market = spec.market_type.upper()
+    if market in UNSUPPORTED_PROP_MARKETS:
+        raise UnprocessableError(
+            f"market_type {spec.market_type!r} is not supported in parlays: team and game props have no "
+            f"simulation leg vocabulary yet (accepted markets: {', '.join(ALLOWED_MARKETS)})"
+        )
     if market not in ALLOWED_MARKETS:
         raise UnprocessableError(
-            f"market_type {spec.market_type!r} is not supported in parlays yet: "
-            f"v1 accepts team markets only ({', '.join(ALLOWED_MARKETS)}); "
-            "player props arrive in Phase 7 Wave 3"
+            f"market_type {spec.market_type!r} is not supported in parlays "
+            f"(accepted markets: {', '.join(ALLOWED_MARKETS)})"
         )
     if spec.side.upper() not in _SIDES_BY_MARKET[market]:
         raise UnprocessableError(
             f"side {spec.side!r} is invalid for {market} (expected one of {sorted(_SIDES_BY_MARKET[market])})"
         )
-
-
-def _leg_identity(spec: ParlayLegSpec) -> tuple[str, str, str, float | None]:
-    return (spec.game_external_id, spec.market_type.upper(), spec.side.upper(), spec.line_value)
+    if market == PLAYER_PROP_MARKET:
+        if not spec.player_external_id:
+            raise UnprocessableError("PLAYER_PROP legs require player_external_id (the ADR-029 name slug)")
+        if not spec.stat_type:
+            raise UnprocessableError("PLAYER_PROP legs require stat_type (the canonical stat key)")
+        prop_type = _normalized_prop_type(spec)
+        if prop_type == PROP_TYPE_YES_NO and spec.line_value is not None:
+            raise UnprocessableError(f"{PROP_TYPE_YES_NO} prop legs take no line_value")
+        if prop_type == PROP_TYPE_OVER_UNDER and spec.line_value is None:
+            raise UnprocessableError(f"{PROP_TYPE_OVER_UNDER} prop legs require a line_value")
 
 
 def _validate_legs(legs: list[ParlayLegSpec]) -> None:
+    """Leg-set validation. Prop legs dedupe on (game, market, player, stat),
+    so the same player's same stat can appear at most once per parlay --
+    opposite sides (mutually exclusive) and near-duplicate lines both
+    collide there; team legs keep the Wave 1 identity and opposite-side
+    guards."""
     if not MIN_LEGS <= len(legs) <= MAX_LEGS:
         raise UnprocessableError(f"parlays take {MIN_LEGS}-{MAX_LEGS} legs, got {len(legs)}")
-    seen: set[tuple[str, str, str, float | None]] = set()
+    seen: set[tuple[str, str, str, float | None] | tuple[str, str, str, str]] = set()
     for spec in legs:
         _validate_leg(spec)
-        identity = _leg_identity(spec)
-        if identity in seen:
-            raise UnprocessableError(f"duplicate leg: {identity}")
+        identity: tuple[str, str, str, float | None] | tuple[str, str, str, str]
+        if spec.market_type.upper() == PLAYER_PROP_MARKET:
+            identity = (
+                spec.game_external_id,
+                PLAYER_PROP_MARKET,
+                spec.player_external_id or "",
+                (spec.stat_type or "").lower(),
+            )
+            if identity in seen:
+                raise UnprocessableError(
+                    f"duplicate or mutually exclusive player-prop leg: {spec.player_external_id} "
+                    f"{spec.stat_type} appears more than once in game {spec.game_external_id}"
+                )
+        else:
+            identity = (spec.game_external_id, spec.market_type.upper(), spec.side.upper(), spec.line_value)
+            if identity in seen:
+                raise UnprocessableError(f"duplicate leg: {identity}")
         seen.add(identity)
     for spec in legs:
         for other in legs:
             if (
                 spec is not other
+                and spec.market_type.upper() != PLAYER_PROP_MARKET
                 and spec.game_external_id == other.game_external_id
                 and spec.market_type.upper() == other.market_type.upper()
                 and spec.side.upper() != other.side.upper()
@@ -185,6 +279,29 @@ def _match_leg_prediction(
         return None
     complements = {"HOME": "AWAY", "AWAY": "HOME", "OVER": "UNDER", "UNDER": "OVER"}
     opposite = side_rows.get(complements.get(side, ""))
+    if opposite is not None:
+        return 1.0 - opposite.predicted_probability, opposite.id
+    return None
+
+
+def _match_prop_prediction(
+    prop_rows: list[PredictionItem], slug: str, stat: str, side: str, line_value: float | None
+) -> tuple[float, str | None] | None:
+    """Calibrated probability for one prop leg from slug-space rows.
+
+    Matches the exact (player, stat, side, line) tuple as the edge detector
+    does; a row for the complementary side of the SAME prop (OVER<->UNDER
+    at the same line, YES<->NO) yields 1 - P.
+    """
+    prop_map = {
+        _prop_prediction_key(row.player_external_id, row.stat_type, row.side, row.prop_line): row
+        for row in prop_rows
+        if row.player_external_id and row.side
+    }
+    direct = prop_map.get(_prop_prediction_key(slug, stat, side, line_value))
+    if direct is not None:
+        return direct.predicted_probability, direct.id
+    opposite = prop_map.get(_prop_prediction_key(slug, stat, _PROP_COMPLEMENTS[side], line_value))
     if opposite is not None:
         return 1.0 - opposite.predicted_probability, opposite.id
     return None
@@ -240,8 +357,21 @@ class ParlayEvaluator:
         predictions_by_game = {
             external_id: await self._prediction.latest_for_game(game.id) for external_id, game in games.items()
         }
+        # Games with prop legs need the Wave 3 slug bridge (built from the
+        # latest run's player distributions) before their legs can resolve.
+        prop_contexts = {
+            external_id: await self._prop_context(games[external_id])
+            for external_id in {
+                spec.game_external_id for spec in legs if spec.market_type.upper() == PLAYER_PROP_MARKET
+            }
+        }
         evaluated = [
-            await self._evaluate_leg(spec, games[spec.game_external_id], predictions_by_game[spec.game_external_id])
+            await self._evaluate_leg(
+                spec,
+                games[spec.game_external_id],
+                predictions_by_game[spec.game_external_id],
+                prop_contexts.get(spec.game_external_id),
+            )
             for spec in legs
         ]
 
@@ -316,7 +446,29 @@ class ParlayEvaluator:
                 return game
         raise NotFoundError(f"no statistics-service game matched external id {game_external_id}")
 
-    async def _evaluate_leg(self, spec: ParlayLegSpec, game: Game, predictions: list[PredictionItem]) -> EvaluatedLeg:
+    async def _prop_context(self, game: Game) -> tuple[str, PlayerBridge]:
+        """Latest simulation run id + slug bridge for a game with prop legs.
+
+        Propagates NotFoundError when the game has no simulation run or the
+        latest run captured no player distributions -- without the bridge a
+        prop leg's slug can never reach the engine UUID space, so the leg
+        cannot be priced.
+        """
+        run = await self._simulation.latest_for_game(game.id)
+        distributions = await self._simulation.get_player_distributions(run.simulation_run_id)
+        return run.simulation_run_id, build_player_bridge(distributions)
+
+    async def _evaluate_leg(
+        self,
+        spec: ParlayLegSpec,
+        game: Game,
+        predictions: list[PredictionItem],
+        prop_context: tuple[str, PlayerBridge] | None = None,
+    ) -> EvaluatedLeg:
+        if spec.market_type.upper() == PLAYER_PROP_MARKET:
+            if prop_context is None:  # pragma: no cover - evaluate() always builds it
+                raise UnprocessableError(f"no prop context for game {spec.game_external_id}")
+            return await self._evaluate_prop_leg(spec, game, predictions, *prop_context)
         matched = _match_leg_prediction(predictions, spec.market_type, spec.side)
         if matched is None:
             raise NotFoundError(
@@ -362,6 +514,105 @@ class ParlayEvaluator:
         if not matching:
             raise NotFoundError(
                 f"no current {spec.market_type.upper()} {spec.side.upper()} line for game {spec.game_external_id}"
+                + (f" at {spec.sportsbook_key}" if spec.sportsbook_key else "")
+            )
+        return max(matching, key=lambda snapshot: american_to_decimal(snapshot.odds_american))
+
+    async def _evaluate_prop_leg(
+        self,
+        spec: ParlayLegSpec,
+        game: Game,
+        predictions: list[PredictionItem],
+        simulation_run_id: str,
+        bridge: PlayerBridge,
+    ) -> EvaluatedLeg:
+        """One PLAYER_PROP leg via the Wave 3 slug-bridge flow.
+
+        The calibrated probability comes from the freshest PLAYER_PROP
+        prediction matching the exact (player, stat, side, line) tuple in
+        slug space (complement fallback within the same prop); when the
+        latest batch has no matching row, one is requested on demand from
+        the prediction engine in UUID space. Odds come from the game's
+        current prop lines (slug + stat + side + line; pinned book
+        honored).
+        """
+        slug = spec.player_external_id or ""
+        stat = (spec.stat_type or "").lower()
+        side = spec.side.upper()
+        player = bridge.resolve(slug)
+        if player is None:
+            raise NotFoundError(f"no simulated player matches prop slug {slug!r} in game {spec.game_external_id}")
+        if player.stat_types and stat not in player.stat_types:
+            raise NotFoundError(
+                f"player {player.name} has no simulated distribution for stat {stat} in game {spec.game_external_id}"
+            )
+
+        prop_rows = rewrite_predictions_to_slugs([p for p in predictions if _is_prop_market(p.market_type)], bridge)
+        matched = _match_prop_prediction(prop_rows, slug, stat, side, spec.line_value)
+        if matched is None:
+            requested = await self._prediction.create_predictions(
+                game.id,
+                simulation_run_id,
+                market_types=[PLAYER_PROP_MARKET],
+                props=[
+                    {
+                        "player_external_id": player.player_uuid,
+                        "player_name": player.name,
+                        "stat_type": spec.stat_type,
+                        "line": spec.line_value,
+                        "side": side,
+                    }
+                ],
+            )
+            matched = _match_prop_prediction(
+                rewrite_predictions_to_slugs(requested, bridge), slug, stat, side, spec.line_value
+            )
+        if matched is None:
+            raise NotFoundError(
+                f"no calibrated prop prediction for {slug} {stat} {side} in game {spec.game_external_id}"
+            )
+        predicted, prediction_id = matched
+        if not 0.0 < predicted < 1.0:
+            raise UnprocessableError(f"calibrated probability {predicted} for {slug} {stat} {side} is outside (0, 1)")
+        snapshot = await self._best_prop_line(spec, slug, stat, side)
+        return EvaluatedLeg(
+            game_external_id=spec.game_external_id,
+            game_id=game.id,
+            league=game.league,
+            market_type=PLAYER_PROP_MARKET,
+            selection=snapshot.selection,
+            side=side,
+            line_value=snapshot.line_value,
+            sportsbook_key=snapshot.sportsbook_key,
+            odds_american=snapshot.odds_american,
+            odds_decimal=round(american_to_decimal(snapshot.odds_american), 4),
+            predicted_probability=predicted,
+            prediction_id=prediction_id,
+            sim_leg_key=prop_sim_leg_key(player.player_uuid, stat, side, spec.line_value),
+            edge_id=spec.edge_id,
+            player_external_id=slug,
+            stat_type=spec.stat_type,
+            prop_type=(snapshot.prop_type or _normalized_prop_type(spec)),
+            player_team=player.team_side or None,
+        )
+
+    async def _best_prop_line(self, spec: ParlayLegSpec, slug: str, stat: str, side: str) -> LineSnapshot:
+        """Best-priced current prop line matching slug + stat + side (+ line)."""
+        snapshots = await self._lines.game_lines(
+            spec.game_external_id, market_type=PLAYER_PROP_MARKET, sportsbook=spec.sportsbook_key
+        )
+        matching = [
+            snapshot
+            for snapshot in snapshots
+            if (snapshot.player_external_id or "") == slug
+            and (snapshot.stat_type or "").lower() == stat
+            and snapshot.side.upper() == side
+            and snapshot.odds_american != 0
+            and (spec.line_value is None or snapshot.line_value == spec.line_value)
+        ]
+        if not matching:
+            raise NotFoundError(
+                f"no current PLAYER_PROP {side} line for {slug} {stat} in game {spec.game_external_id}"
                 + (f" at {spec.sportsbook_key}" if spec.sportsbook_key else "")
             )
         return max(matching, key=lambda snapshot: american_to_decimal(snapshot.odds_american))
@@ -423,6 +674,9 @@ class ParlayEvaluator:
         except ApiError as exc:
             logger.info("simulation correlations unavailable for game %s (%s); using priors", game.id, exc.message)
 
+        # Prop legs feed their identity and player team side into the prior
+        # accessor (Wave 4): the ML/SPREAD x PLAYER_PROP prior is signed by
+        # team agreement x prop direction (see edges/correlation.py).
         rhos = {
             (a, b): correlation_prior(
                 group_legs[a].market_type,
@@ -430,6 +684,12 @@ class ParlayEvaluator:
                 group_legs[b].market_type,
                 group_legs[b].side,
                 same_game=True,
+                player_a=group_legs[a].player_external_id,
+                player_b=group_legs[b].player_external_id,
+                stat_a=group_legs[a].stat_type,
+                stat_b=group_legs[b].stat_type,
+                player_team_a=group_legs[a].player_team,
+                player_team_b=group_legs[b].player_team,
             )
             for a in range(len(group_legs))
             for b in range(a + 1, len(group_legs))
@@ -488,6 +748,11 @@ class ParlayEvaluator:
                 "selection": leg.selection,
                 "side": leg.side,
                 "line_value": leg.line_value,
+                # Prop identity columns (ADR-029 name slug, matching the
+                # Wave 3 edges convention); None for team-market legs.
+                "player_external_id": leg.player_external_id,
+                "stat_type": leg.stat_type,
+                "prop_type": leg.prop_type,
                 "odds_american": leg.odds_american,
                 "odds_decimal": leg.odds_decimal,
                 "predicted_probability": leg.predicted_probability,
