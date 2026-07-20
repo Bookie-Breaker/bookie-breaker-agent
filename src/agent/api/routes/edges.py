@@ -86,6 +86,9 @@ def _to_list_item(edge: EdgeRecord, game: Game | None) -> EdgeListItem:
         expires_at=edge.expires_at.isoformat().replace("+00:00", "Z"),
         is_stale=edge.is_stale,
         is_live=edge.is_live,
+        player_external_id=edge.player_external_id,
+        stat_type=edge.stat_type,
+        prop_type=edge.prop_type,
         has_paper_bet=edge.paper_bet_id is not None,
         paper_bet_id=str(edge.paper_bet_id) if edge.paper_bet_id else None,
     )

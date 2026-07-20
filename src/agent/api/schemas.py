@@ -139,6 +139,10 @@ class EdgeListItem(BaseModel):
     # In-game edge from a live re-evaluation (Phase 7 Wave 2; surfaced here
     # in Wave 3 -- the repository already returned it, the schema did not).
     is_live: bool = False
+    # Player-prop identity (ADR-029 name slug); None for team markets.
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
     has_paper_bet: bool
     paper_bet_id: str | None
 
