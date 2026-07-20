@@ -10,6 +10,7 @@ recorded inside the steps JSONB map and never abort the run.
 import asyncio
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -17,8 +18,8 @@ from typing import Any
 import redis.asyncio as aioredis
 
 from agent.api.errors import ApiError, DuplicateResourceError
-from agent.clients.lines import LinesClient
-from agent.clients.prediction import PredictionClient
+from agent.clients.lines import LinesClient, LineSnapshot
+from agent.clients.prediction import PredictionClient, PredictionItem
 from agent.clients.reconcile import GameReconciler
 from agent.clients.simulation import SimulationClient
 from agent.clients.statistics import Game, StatisticsClient
@@ -26,6 +27,7 @@ from agent.core.alerts import AlertService
 from agent.core.bettor import AutoBettor, candidate_key
 from agent.core.edge_detector import EdgeCandidate, EdgeDetector
 from agent.core.parlay_scanner import ParlayScanner
+from agent.core.props import build_player_bridge, build_prop_requests, prop_lines, rewrite_predictions_to_slugs
 from agent.db.repository import (
     DuplicateRunningRunError,
     EdgeRecord,
@@ -94,6 +96,7 @@ class PipelineRunner:
         redis_client: "aioredis.Redis",
         concurrency: int = 4,
         parlay_scanner: ParlayScanner | None = None,
+        prop_edges_leagues: Sequence[str] = (),
     ) -> None:
         self._run_repo = run_repo
         self._edge_repo = edge_repo
@@ -110,6 +113,9 @@ class PipelineRunner:
         # Optional post-edge-detection parlay scan (PARLAY_SCAN_ENABLED);
         # None keeps the Phase 3 pipeline shape.
         self._parlay_scanner = parlay_scanner
+        # Leagues whose games run the Phase 7 Wave 3 prop step
+        # (PROP_EDGES_LEAGUES); empty disables props entirely.
+        self._prop_leagues = frozenset(league.upper() for league in prop_edges_leagues)
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def start_run(self, params: RunParams, trigger: str = "MANUAL") -> tuple[PipelineRunRecord, int]:
@@ -268,16 +274,23 @@ class PipelineRunner:
         outcome = _GameOutcome(game=game)
         game_external_id = await self._reconciler.resolve(game)
 
+        props_enabled = game.league.upper() in self._prop_leagues
+        sim_config = params.simulation_config
+        if props_enabled:
+            # Prop-enabled leagues need per-player stat distributions from
+            # the run (feeds the slug bridge + prop predictions below).
+            sim_config = {**(sim_config or {}), "include_player_props": True}
+
         try:
             if params.force_refresh:
-                run = await self._simulation.run_simulation(game.id, params.simulation_config, force_refresh=True)
+                run = await self._simulation.run_simulation(game.id, sim_config, force_refresh=True)
             else:
                 try:
                     run = await self._simulation.latest_for_game(game.id)
                 except ApiError as exc:
                     if exc.status_code != 404:
                         raise
-                    run = await self._simulation.run_simulation(game.id, params.simulation_config)
+                    run = await self._simulation.run_simulation(game.id, sim_config)
         except ApiError as exc:
             outcome.errors["simulation"] = exc.message
             return outcome
@@ -298,10 +311,51 @@ class PipelineRunner:
         except ApiError as exc:
             outcome.errors["edge_detection"] = exc.message
             return outcome
+
+        if props_enabled:
+            prop_rows = await self._prop_predictions(game, run.simulation_run_id, lines)
+            if prop_rows:
+                predictions = [*predictions, *prop_rows]
+                outcome.predictions_count = len(predictions)
+                outcome.market_types |= {p.market_type for p in prop_rows}
+
         outcome.candidates = self._detector.detect(
             game, game_external_id, predictions, lines, simulation_run_id=run.simulation_run_id, now=now
         )
         return outcome
+
+    async def _prop_predictions(
+        self, game: Game, simulation_run_id: str, lines: list[LineSnapshot]
+    ) -> list[PredictionItem]:
+        """Best-effort prop prediction step (Phase 7 Wave 3).
+
+        Bridges lines-service prop name slugs to engine player UUIDs via the
+        simulation run's player distributions, requests PLAYER_PROP
+        predictions for the resolvable prop lines, and rewrites the returned
+        rows back into slug space so the detector matches them against the
+        lines (identity convention documented in core/props.py). Any failure
+        -- a cached run without player distributions (404), an engine error,
+        an unexpected payload -- logs and returns []: props never break the
+        team pipeline.
+        """
+        game_prop_lines = prop_lines(lines)
+        if not game_prop_lines:
+            return []
+        try:
+            distributions = await self._simulation.get_player_distributions(simulation_run_id)
+            bridge = build_player_bridge(distributions)
+            requests = build_prop_requests(game_prop_lines, bridge)
+            if not requests:
+                return []
+            rows = await self._prediction.create_predictions(
+                game.id, simulation_run_id, market_types=["PLAYER_PROP"], props=requests
+            )
+            return rewrite_predictions_to_slugs(rows, bridge)
+        except Exception:  # noqa: BLE001 - the prop step is strictly best-effort
+            logger.warning(
+                "prop prediction step failed for game %s; continuing with team markets", game.id, exc_info=True
+            )
+            return []
 
     @staticmethod
     def _edge_values(run_id: uuid.UUID | None, candidate: EdgeCandidate, recommended_stake: float) -> dict[str, Any]:

@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     parlay_scan_min_edge_pct: float = 0.6  # fraction of the league min EV an edge needs to enter the scan
     parlay_auto_bet: bool = False  # let the scanner place paper parlays for meets_threshold results
 
+    # Player-prop edges (Phase 7 Wave 3). The prop step (simulate with
+    # include_player_props, bridge slugs to engine UUIDs, request
+    # PLAYER_PROP predictions) runs only for leagues in this list; an
+    # empty list disables prop edge detection entirely.
+    prop_edges_leagues: list[str] = ["FIFA_WC", "EPL", "MLB"]
+    # Single-sided YES/NO props have no complement price to de-vig
+    # against; the raw implied probability is deflated multiplicatively
+    # instead: p_true_est = implied / (1 + haircut). See core/edge_detector.
+    single_sided_vig_haircut: float = 0.06
+
     # Live edges (Phase 7 Wave 2). Off by default: is_live lines.updated
     # events trigger a trimmed per-game re-evaluation behind an aggressive
     # per-game debounce (sub-second live frames must coalesce).

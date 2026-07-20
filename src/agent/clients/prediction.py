@@ -17,10 +17,16 @@ class PredictionItem(BaseModel):
     # (HOME/AWAY/DRAW/OVER/UNDER) for side-based matching (ADR-027)
     side: str | None = None
     predicted_probability: float
-    # Player-prop metadata (Phase 7 Wave 0); None for game-market predictions
+    # Player-prop metadata (Phase 7 Wave 0); None for game-market predictions.
+    # NOTE: prediction-engine rows carry the statistics-service player UUID in
+    # player_external_id -- the pipeline rewrites it to the ADR-029 name slug
+    # before edge detection (see core/props.py).
     player_external_id: str | None = None
     stat_type: str | None = None
     prop_type: str | None = None
+    # The prop line the row was predicted for (Phase 7 Wave 3); None for
+    # game markets and YES/NO props.
+    prop_line: float | None = None
     simulation_probability: float | None = None
     adjustment_magnitude: float = 0.0
     confidence_lower: float | None = None
@@ -42,10 +48,20 @@ class PredictionClient(ServiceClient):
         game_id: str,
         simulation_run_id: str,
         market_types: list[str] | None = None,
+        props: list[dict[str, Any]] | None = None,
     ) -> list[PredictionItem]:
+        """Create a prediction batch for one game + simulation run.
+
+        props (Phase 7 Wave 3) requests PLAYER_PROP rows; each item is
+        {player_external_id (statistics-service player UUID), player_name,
+        stat_type, line, side}. Returned prop rows echo player_external_id,
+        stat_type, side, and the requested line as prop_line.
+        """
         body: dict[str, Any] = {"game_id": game_id, "simulation_run_id": simulation_run_id}
         if market_types:
             body["market_types"] = market_types
+        if props:
+            body["props"] = props
         # Retriable: prediction batches are idempotent per game + simulation run
         data = await self.post_data(
             "/api/v1/predict/predictions", f"predictions for game {game_id}", body, retriable=True

@@ -137,6 +137,39 @@ class TestPlaceBet:
         assert body["reasoning"]
         assert repo.paper_bets == [(record.id, uuid.UUID(bet_id))]
 
+    async def test_prop_bet_body_carries_slug_identity(self) -> None:
+        # ADR-029: the emulator grades props by NAME SLUG -- the bet body
+        # must carry the slug from the line, never the engine player UUID.
+        emulator = FakeEmulator()
+        bettor = make_bettor(emulator, FakeEdgeRepo())
+        record = make_edge_record(
+            market_type="PLAYER_PROP",
+            selection="José Ramírez Over 1.5 Hits",
+            side="OVER",
+            line_value=1.5,
+            player_external_id="jose-ramirez",
+            stat_type="player_hits",
+            prop_type="OVER_UNDER",
+        )
+
+        await bettor.place_bet(record, stake=2.0, kelly_used=0.02)
+
+        body, _ = emulator.placed[0]
+        assert body["player_external_id"] == "jose-ramirez"
+        assert body["stat_type"] == "player_hits"
+        assert body["prop_type"] == "OVER_UNDER"
+
+    async def test_team_bet_body_prop_fields_null(self) -> None:
+        emulator = FakeEmulator()
+        bettor = make_bettor(emulator, FakeEdgeRepo())
+
+        await bettor.place_bet(make_edge_record(), stake=1.0, kelly_used=0.01)
+
+        body, _ = emulator.placed[0]
+        assert body["player_external_id"] is None
+        assert body["stat_type"] is None
+        assert body["prop_type"] is None
+
     async def test_existing_paper_bet_skipped(self) -> None:
         emulator = FakeEmulator()
         bettor = make_bettor(emulator)

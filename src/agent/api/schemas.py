@@ -136,6 +136,9 @@ class EdgeListItem(BaseModel):
     detected_at: str
     expires_at: str
     is_stale: bool
+    # In-game edge from a live re-evaluation (Phase 7 Wave 2; surfaced here
+    # in Wave 3 -- the repository already returned it, the schema did not).
+    is_live: bool = False
     has_paper_bet: bool
     paper_bet_id: str | None
 

@@ -1,7 +1,8 @@
-"""Phase 7 Wave 0: player-prop/live fields thread through models and inserts."""
+"""Phase 7 Wave 0/3: player-prop/live fields thread through models, inserts, and the API."""
 
 import uuid
 
+from agent.api.routes.edges import _to_list_item
 from agent.clients.lines import LineSnapshot
 from agent.clients.prediction import PredictionItem
 from agent.core.pipeline import PipelineRunner
@@ -86,6 +87,7 @@ class TestPredictionItemPropFields:
         assert item.player_external_id is None
         assert item.stat_type is None
         assert item.prop_type is None
+        assert item.prop_line is None
 
     def test_parses_payload_with_prop_fields(self) -> None:
         item = PredictionItem.model_validate(
@@ -98,11 +100,29 @@ class TestPredictionItemPropFields:
                 "player_external_id": "player-lebron-james",
                 "stat_type": "points",
                 "prop_type": "over_under",
+                "prop_line": 27.5,
             }
         )
         assert item.player_external_id == "player-lebron-james"
         assert item.stat_type == "points"
         assert item.prop_type == "over_under"
+        assert item.prop_line == 27.5
+
+
+class TestEdgeListItemIsLive:
+    """Phase 7 Wave 3: is_live surfaced on the edges list response (UI gap)."""
+
+    def test_defaults_false(self) -> None:
+        item = _to_list_item(make_edge_record(), None)
+        assert item.is_live is False
+
+    def test_live_record_maps_true(self) -> None:
+        item = _to_list_item(make_edge_record(is_live=True), None)
+        assert item.is_live is True
+
+    def test_serialized_payload_carries_is_live(self) -> None:
+        payload = _to_list_item(make_edge_record(is_live=True), None).model_dump()
+        assert payload["is_live"] is True
 
 
 class TestLineSnapshotPropFields:

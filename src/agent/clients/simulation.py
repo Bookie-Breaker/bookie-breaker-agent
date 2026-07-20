@@ -40,6 +40,32 @@ class CorrelationsData(BaseModel):
     joint_goal_grid: list[list[float]] | None = None
 
 
+class PlayerDistributionEntry(BaseModel):
+    """One simulated player: display name plus per-stat distribution summaries."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    # stat_type -> distribution summary. Opaque to the agent: only the keys
+    # matter here (prop stat availability checks in core/props.py).
+    stats: dict[str, Any] = {}
+
+
+class PlayerDistributions(BaseModel):
+    """Per-player stat distributions for one run (Phase 7 Wave 3).
+
+    ``players`` is keyed by the statistics-service player UUID; each entry
+    carries the display name the agent slugs to match lines-service prop
+    identities (ADR-029 name-slug convention, see core/props.py).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    simulation_run_id: str = ""
+    game_id: str = ""
+    players: dict[str, PlayerDistributionEntry] = {}
+
+
 class SimulationClient(ServiceClient):
     service_name = "simulation-engine"
 
@@ -57,6 +83,18 @@ class SimulationClient(ServiceClient):
         )
         return CorrelationsData.model_validate(data)
 
+    async def get_player_distributions(self, simulation_run_id: str) -> PlayerDistributions:
+        """Player stat distributions for one run (Phase 7 Wave 3).
+
+        404s (surfaced as NotFoundError) when the run was simulated without
+        ``include_player_props`` in its config.
+        """
+        data = await self.get_data(
+            f"/api/v1/sim/simulations/{simulation_run_id}/player-distributions",
+            f"player distributions for simulation {simulation_run_id}",
+        )
+        return PlayerDistributions.model_validate(data)
+
     async def run_simulation(
         self,
         game_id: str,
@@ -67,7 +105,8 @@ class SimulationClient(ServiceClient):
         """Run a simulation; live_state (Phase 7 Wave 2) pins the current
         in-game situation: {home_score, away_score, fraction_remaining (0,1],
         period?, clock_seconds?, bases?, outs?, half?, possession?, down?,
-        yardline?}."""
+        yardline?}. config may carry include_player_props (Phase 7 Wave 3)
+        to make the run produce per-player stat distributions."""
         body: dict[str, Any] = {"game_id": game_id, "force_refresh": force_refresh}
         if config:
             body["config"] = config
