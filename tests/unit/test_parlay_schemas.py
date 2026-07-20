@@ -17,11 +17,27 @@ class TestParlayLegRequest:
         for market in ("SPREAD", "total", "Moneyline"):
             assert ParlayLegRequest.model_validate(leg(market_type=market)).market_type == market.upper()
 
-    def test_prop_market_rejected_with_wave3_message(self) -> None:
-        with pytest.raises(ValidationError) as excinfo:
-            ParlayLegRequest.model_validate(leg(market_type="PLAYER_PROP"))
-        assert "Wave 3" in str(excinfo.value)
-        assert "team markets only" in str(excinfo.value)
+    def test_player_prop_market_accepted_with_identity(self) -> None:
+        # Phase 7 Wave 4: PLAYER_PROP legs carry the ADR-029 slug identity.
+        parsed = ParlayLegRequest.model_validate(
+            leg(
+                market_type="player_prop",
+                side="YES",
+                player_external_id="kylian-mbappe",
+                stat_type="player_goal_scorer_anytime",
+                prop_type="YES_NO",
+            )
+        )
+        assert parsed.market_type == "PLAYER_PROP"
+        assert parsed.player_external_id == "kylian-mbappe"
+        assert parsed.stat_type == "player_goal_scorer_anytime"
+        assert parsed.prop_type == "YES_NO"
+
+    def test_team_and_game_props_rejected(self) -> None:
+        for market in ("TEAM_PROP", "GAME_PROP"):
+            with pytest.raises(ValidationError) as excinfo:
+                ParlayLegRequest.model_validate(leg(market_type=market))
+            assert "not supported" in str(excinfo.value)
 
     def test_unknown_market_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -31,6 +47,9 @@ class TestParlayLegRequest:
         parsed = ParlayLegRequest.model_validate(leg())
         assert parsed.line_value is None
         assert parsed.sportsbook_key is None
+        assert parsed.player_external_id is None
+        assert parsed.stat_type is None
+        assert parsed.prop_type is None
 
 
 class TestParlayEvaluateRequest:

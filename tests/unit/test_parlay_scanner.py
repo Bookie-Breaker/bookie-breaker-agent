@@ -7,7 +7,7 @@ import pytest
 
 from agent.api.errors import DependencyError
 from agent.core.parlay import ParlayLegSpec
-from agent.core.parlay_scanner import MAX_COMBINATIONS, ParlayScanner
+from agent.core.parlay_scanner import MAX_COMBINATIONS, MAX_PROP_LEGS_PER_COMBO, ParlayScanner
 from agent.db.repository import EdgeRecord
 from tests.unit.factories import make_edge_record, utc_now
 
@@ -65,11 +65,23 @@ def edge(market: str, side: str, line: float | None = None, ev: float = 0.05, **
     return make_edge_record(**values)
 
 
+def prop_edge(slug: str, stat: str = "player_goal_scorer_anytime", side: str = "YES", ev: float = 0.05) -> EdgeRecord:
+    return edge(
+        "PLAYER_PROP",
+        side,
+        ev=ev,
+        player_external_id=slug,
+        stat_type=stat,
+        prop_type="YES_NO" if side in ("YES", "NO") else "OVER_UNDER",
+    )
+
+
 def scanner_for(
     edges: list[EdgeRecord],
     evaluator: StubEvaluator | None = None,
     bettor: StubBettor | None = None,
     min_edge_ratio: float = 0.6,
+    include_props: bool = False,
 ) -> tuple[ParlayScanner, StubEvaluator]:
     evaluator = evaluator or StubEvaluator()
     scanner = ParlayScanner(
@@ -77,6 +89,7 @@ def scanner_for(
         evaluator,  # type: ignore[arg-type]
         min_edge_ratio=min_edge_ratio,
         bettor=bettor,  # type: ignore[arg-type]
+        include_props=include_props,
     )
     return scanner, evaluator
 
@@ -92,15 +105,37 @@ class TestSelectCandidates:
         selected = scanner.select_candidates(edges)
         assert [e.market_type for e in selected] == ["MONEYLINE"]
 
-    def test_excludes_prop_markets_and_sideless_edges(self) -> None:
+    def test_excludes_prop_markets_by_default_and_sideless_edges(self) -> None:
+        # PARLAY_SCAN_INCLUDE_PROPS off (the default): prop edges stay out.
         edges = [
             edge("MONEYLINE", "HOME"),
-            edge("PLAYER_PROP", "OVER", 27.5),
+            prop_edge("lebron-james", stat="player_points", side="OVER"),
             make_edge_record(game_external_id="ext-game-1", market_type="TOTAL", side=None, expected_value=0.05),
         ]
         scanner, _ = scanner_for(edges)
         selected = scanner.select_candidates(edges)
         assert [e.market_type for e in selected] == ["MONEYLINE"]
+
+    def test_include_props_admits_prop_edges_with_slug_identity(self) -> None:
+        edges = [
+            edge("MONEYLINE", "HOME"),
+            prop_edge("bukayo-saka"),
+            # incomplete identity: no slug -> never a candidate leg
+            edge("PLAYER_PROP", "YES", ev=0.06),
+        ]
+        scanner, _ = scanner_for(edges, include_props=True)
+        selected = scanner.select_candidates(edges)
+        assert sorted(e.market_type for e in selected) == ["MONEYLINE", "PLAYER_PROP"]
+        assert all(e.player_external_id for e in selected if e.market_type == "PLAYER_PROP")
+
+    def test_prop_candidates_dedupe_per_player_and_stat(self) -> None:
+        best = prop_edge("bukayo-saka", ev=0.08)
+        worse = prop_edge("bukayo-saka", ev=0.04)
+        other_player = prop_edge("cole-palmer", ev=0.05)
+        scanner, _ = scanner_for([worse, best, other_player], include_props=True)
+        selected = scanner.select_candidates([worse, best, other_player])
+        assert len(selected) == 2
+        assert {e.player_external_id for e in selected} == {"bukayo-saka", "cole-palmer"}
 
     def test_dedupes_same_leg_keeping_best_ev(self) -> None:
         best = edge("MONEYLINE", "HOME", ev=0.08, sportsbook_key="fanduel")
@@ -160,6 +195,46 @@ class TestEnumerateCombinations:
         identities = [frozenset((e.market_type, e.side, e.line_value) for e in combo) for combo in combos]
         assert len(identities) == len(set(identities))
 
+    def test_relaxed_guard_allows_two_players_props_in_one_combo(self) -> None:
+        # Wave 4: distinctness is per (market, player, stat) -- two
+        # different players' PLAYER_PROP legs share a combo with a team leg.
+        candidates = [
+            edge("MONEYLINE", "HOME"),
+            prop_edge("bukayo-saka"),
+            prop_edge("cole-palmer"),
+        ]
+        combos = ParlayScanner.enumerate_combinations(candidates)
+        assert any(
+            {e.player_external_id for e in combo} == {"bukayo-saka", "cole-palmer"}
+            for combo in combos
+            if len(combo) == 2
+        )
+        # the classic SGP: ML + two goalscorers
+        assert any(len(combo) == 3 for combo in combos)
+
+    def test_same_player_same_stat_never_shares_a_combo(self) -> None:
+        candidates = [
+            edge("MONEYLINE", "HOME"),
+            prop_edge("bukayo-saka", side="YES"),
+            prop_edge("bukayo-saka", side="NO"),
+        ]
+        combos = ParlayScanner.enumerate_combinations(candidates)
+        for combo in combos:
+            keys = [(e.player_external_id, e.stat_type) for e in combo if e.market_type == "PLAYER_PROP"]
+            assert len(keys) == len(set(keys))
+
+    def test_prop_leg_cap_per_combo(self) -> None:
+        candidates = [
+            prop_edge("bukayo-saka"),
+            prop_edge("cole-palmer"),
+            prop_edge("erling-haaland"),
+        ]
+        combos = ParlayScanner.enumerate_combinations(candidates)
+        assert combos  # 2-prop combos survive
+        for combo in combos:
+            props = sum(1 for e in combo if e.market_type == "PLAYER_PROP")
+            assert props <= MAX_PROP_LEGS_PER_COMBO
+
 
 class TestScanGame:
     async def test_evaluates_combos_and_keeps_actionable(self) -> None:
@@ -176,6 +251,17 @@ class TestScanGame:
         assert all(spec.game_external_id == "ext-game-1" for spec in first_specs)
         assert all(spec.edge_id is not None for spec in first_specs)
         assert all(spec.sportsbook_key is not None for spec in first_specs)
+
+    async def test_prop_edges_become_specs_with_slug_identity(self) -> None:
+        edges = [edge("MONEYLINE", "HOME"), prop_edge("bukayo-saka")]
+        scanner, evaluator = scanner_for(edges, include_props=True)
+        await scanner.scan_game("ext-game-1")
+        prop_specs = [spec for call in evaluator.calls for spec in call if spec.market_type == "PLAYER_PROP"]
+        assert prop_specs
+        for spec in prop_specs:
+            assert spec.player_external_id == "bukayo-saka"
+            assert spec.stat_type == "player_goal_scorer_anytime"
+            assert spec.prop_type == "YES_NO"
 
     async def test_below_threshold_results_dropped(self) -> None:
         edges = [edge("MONEYLINE", "HOME"), edge("TOTAL", "OVER", 220.5)]

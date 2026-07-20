@@ -157,15 +157,19 @@ class ParlayLegRequest(BaseModel):
     side: str = Field(min_length=1)
     line_value: float | None = None
     sportsbook_key: str | None = None
+    # Player-prop identity (Phase 7 Wave 4), required for PLAYER_PROP legs.
+    player_external_id: str | None = Field(default=None, description="ADR-029 player name slug (PLAYER_PROP legs only)")
+    stat_type: str | None = Field(default=None, description="Canonical stat key (PLAYER_PROP legs only)")
+    prop_type: str | None = Field(default=None, description="OVER_UNDER or YES_NO; inferred from the side when omitted")
 
     @field_validator("market_type")
     @classmethod
-    def _team_markets_only(cls, value: str) -> str:
+    def _supported_markets_only(cls, value: str) -> str:
         market = value.upper()
-        if market not in ("SPREAD", "TOTAL", "MONEYLINE"):
+        if market not in ("SPREAD", "TOTAL", "MONEYLINE", "PLAYER_PROP"):
             raise ValueError(
-                f"market_type {value!r} is not supported in parlays yet: v1 accepts team markets only "
-                "(SPREAD, TOTAL, MONEYLINE); player props arrive in Phase 7 Wave 3"
+                f"market_type {value!r} is not supported in parlays: accepted markets are SPREAD, TOTAL, "
+                "MONEYLINE, PLAYER_PROP (team and game props have no simulation leg vocabulary yet)"
             )
         return market
 
@@ -190,6 +194,10 @@ class ParlayLegData(BaseModel):
     odds_decimal: float
     predicted_probability: float
     sim_leg_key: str | None = None
+    # Player-prop identity (ADR-029 name slug); None for team-market legs.
+    player_external_id: str | None = None
+    stat_type: str | None = None
+    prop_type: str | None = None
 
 
 class ParlayEvaluationData(BaseModel):

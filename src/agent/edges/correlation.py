@@ -30,8 +30,19 @@ TEAM_MARKETS = frozenset({"SPREAD", "MONEYLINE"})
 #   positively correlated; opposite teams flip the sign. The magnitude is
 #   capped at 0.30 -- the first-order approximation's validity limit --
 #   and the simulation path should be preferred for this pair.
-# - MONEYLINE + PLAYER_PROP: team winning is positively correlated with a
-#   star's OVER (doc: ML + player points over); UNDER props flip the sign.
+# - MONEYLINE/SPREAD + PLAYER_PROP (Phase 7 Wave 4 sign conventions):
+#   team success is positively correlated with a star's OVER/YES (doc: ML +
+#   player points over ~ +0.20) WHEN the player plays for the bet-on team;
+#   betting the opposite team flips the sign (the player's team losing means
+#   fewer touches for the star), and UNDER/NO props flip it again. The
+#   player's team comes from the simulation player-distributions payload
+#   (player_team_* kwargs); when it is unknown the player is assumed to be
+#   on the bet-on team (the Wave 1 behavior). A DRAW moneyline side has no
+#   documented prior against player props and returns 0.0.
+# - PLAYER_PROP + PLAYER_PROP (two different players, or one player across
+#   two stats) has no documented prior and returns 0.0; such pairs never
+#   raise the mutual-exclusion error unless they are the same player AND
+#   the same stat.
 # - Cross-game pairs default to 0.0 (independent matchups). The doc's
 #   same-division (+0.035) and weather (+0.10) priors need schedule and
 #   weather context this accessor does not have.
@@ -173,8 +184,10 @@ def scaled_joint_probability(
 
 
 def _total_direction(market_type: str, side: str | None) -> float:
-    """+1 for OVER-like outcomes, -1 for UNDER; +1 for non-total markets."""
-    if market_type in ("TOTAL", "PLAYER_PROP") and side == "UNDER":
+    """+1 for OVER/YES-like outcomes, -1 for UNDER/NO; +1 for team markets."""
+    if market_type == "PLAYER_PROP" and side in ("UNDER", "NO"):
+        return -1.0
+    if market_type == "TOTAL" and side == "UNDER":
         return -1.0
     return 1.0
 
@@ -185,6 +198,13 @@ def correlation_prior(
     market_b: str,
     side_b: str | None,
     same_game: bool,
+    *,
+    player_a: str | None = None,
+    player_b: str | None = None,
+    stat_a: str | None = None,
+    stat_b: str | None = None,
+    player_team_a: str | None = None,
+    player_team_b: str | None = None,
 ) -> float:
     """Prior correlation for a leg pair when no simulation data is available.
 
@@ -192,16 +212,27 @@ def correlation_prior(
     the documented sign conventions (see the table's comment). Cross-game
     pairs return 0.0 (independent matchups default).
 
+    The keyword arguments carry player-prop identity (Phase 7 Wave 4):
+    ``player_*``/``stat_*`` scope the mutual-exclusion check to one prop
+    instance, and ``player_team_*`` (HOME/AWAY, from the simulation
+    player-distributions payload) drives the team-agreement sign for
+    team-market x player-prop pairs.
+
     Raises ValueError for opposite sides of the same market in the same
     game -- those outcomes are mutually exclusive and must never be
-    combined into a parlay.
+    combined into a parlay. For PLAYER_PROP pairs that only applies to the
+    same player's same stat; distinct players (or stats) legitimately
+    combine with any side mix.
     """
     market_a = market_a.upper()
     market_b = market_b.upper()
     side_a = side_a.upper() if side_a else None
     side_b = side_b.upper() if side_b else None
 
-    if same_game and market_a == market_b and side_a != side_b:
+    same_prop_instance = (
+        player_a is not None and player_a == player_b and (stat_a or "").lower() == (stat_b or "").lower()
+    )
+    if same_game and market_a == market_b and side_a != side_b and (market_a != "PLAYER_PROP" or same_prop_instance):
         raise ValueError(f"opposite sides of the same {market_a} market cannot be parlayed in the same game")
     if not same_game:
         return 0.0
@@ -214,4 +245,16 @@ def correlation_prior(
     # (ML + spread); the total direction drives it for total/prop pairs.
     if market_a in TEAM_MARKETS and market_b in TEAM_MARKETS:
         return base if side_a == side_b else -base
+
+    # Team-market x player-prop: sign = team-agreement x prop direction.
+    prop_pairs = ((market_a, side_a, player_team_b), (market_b, side_b, player_team_a))
+    for team_market, team_side, player_team in prop_pairs:
+        if team_market in TEAM_MARKETS:
+            if team_side == "DRAW":
+                return 0.0
+            agreement = 1.0
+            if team_side in ("HOME", "AWAY") and player_team in ("HOME", "AWAY"):
+                agreement = 1.0 if team_side == player_team else -1.0
+            return base * agreement * _total_direction(market_a, side_a) * _total_direction(market_b, side_b)
+
     return base * _total_direction(market_a, side_a) * _total_direction(market_b, side_b)

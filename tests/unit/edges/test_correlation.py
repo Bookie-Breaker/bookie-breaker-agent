@@ -168,6 +168,70 @@ class TestCorrelationPrior:
         assert correlation_prior("spread", "home", "total", "over", same_game=True) == pytest.approx(0.15)
 
 
+class TestPropPriorSignConventions:
+    """Phase 7 Wave 4: team-agreement x prop-direction signs.
+
+    rho(ML/SPREAD side S, prop of player P) = base * agree(S, team(P)) *
+    dir(prop side), with agree = +1 same team / -1 opposite team (unknown
+    team assumes the bet-on team) and dir = +1 OVER/YES, -1 UNDER/NO.
+    """
+
+    def test_ml_same_team_yes_positive(self) -> None:
+        rho = correlation_prior("MONEYLINE", "HOME", "PLAYER_PROP", "YES", same_game=True, player_team_b="HOME")
+        assert rho == pytest.approx(0.20)
+
+    def test_ml_opposite_team_flips_sign(self) -> None:
+        rho = correlation_prior("MONEYLINE", "AWAY", "PLAYER_PROP", "YES", same_game=True, player_team_b="HOME")
+        assert rho == pytest.approx(-0.20)
+
+    def test_no_side_flips_direction(self) -> None:
+        rho = correlation_prior("MONEYLINE", "HOME", "PLAYER_PROP", "NO", same_game=True, player_team_b="HOME")
+        assert rho == pytest.approx(-0.20)
+
+    def test_opposite_team_under_double_flip(self) -> None:
+        rho = correlation_prior("MONEYLINE", "AWAY", "PLAYER_PROP", "UNDER", same_game=True, player_team_b="HOME")
+        assert rho == pytest.approx(0.20)
+
+    def test_prop_leg_first_argument_order_irrelevant(self) -> None:
+        rho = correlation_prior("PLAYER_PROP", "YES", "SPREAD", "AWAY", same_game=True, player_team_a="AWAY")
+        assert rho == pytest.approx(0.15)
+
+    def test_draw_side_has_no_prior(self) -> None:
+        rho = correlation_prior("MONEYLINE", "DRAW", "PLAYER_PROP", "YES", same_game=True, player_team_b="HOME")
+        assert rho == 0.0
+
+    def test_unknown_player_team_keeps_wave1_sign(self) -> None:
+        assert correlation_prior("MONEYLINE", "HOME", "PLAYER_PROP", "YES", same_game=True) == pytest.approx(0.20)
+
+    def test_two_players_props_do_not_raise_and_default_zero(self) -> None:
+        rho = correlation_prior(
+            "PLAYER_PROP",
+            "YES",
+            "PLAYER_PROP",
+            "NO",
+            same_game=True,
+            player_a="bukayo-saka",
+            player_b="cole-palmer",
+            stat_a="player_goal_scorer_anytime",
+            stat_b="player_goal_scorer_anytime",
+        )
+        assert rho == 0.0
+
+    def test_same_player_same_stat_opposite_sides_raises(self) -> None:
+        with pytest.raises(ValueError, match="cannot be parlayed"):
+            correlation_prior(
+                "PLAYER_PROP",
+                "YES",
+                "PLAYER_PROP",
+                "NO",
+                same_game=True,
+                player_a="bukayo-saka",
+                player_b="bukayo-saka",
+                stat_a="player_goal_scorer_anytime",
+                stat_b="player_goal_scorer_anytime",
+            )
+
+
 class TestCorrelatedKelly:
     def test_matches_kelly_fraction_for_single_leg(self) -> None:
         for odds in (-140, -110, 120, 250):

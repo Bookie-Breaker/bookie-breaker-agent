@@ -103,6 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             parlay_evaluator,
             min_edge_ratio=settings.parlay_scan_min_edge_pct,
             bettor=bettor if settings.parlay_auto_bet else None,
+            include_props=settings.parlay_scan_include_props,
         )
         # LLM construction is lazy (no eager connection): startup stays
         # crash-loop-safe when Anthropic/Ollama are unreachable.

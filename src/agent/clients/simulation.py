@@ -46,6 +46,11 @@ class PlayerDistributionEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = ""
+    # Which side the player plays for (HOME | AWAY). Drives the
+    # team-agreement sign when a prop leg pairs with a team-market leg in
+    # the correlation-prior fallback (Phase 7 Wave 4); "" when the payload
+    # predates the field.
+    team: str = ""
     # stat_type -> distribution summary. Opaque to the agent: only the keys
     # matter here (prop stat availability checks in core/props.py).
     stats: dict[str, Any] = {}

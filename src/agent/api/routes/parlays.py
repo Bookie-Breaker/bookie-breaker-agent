@@ -31,6 +31,9 @@ def _to_evaluation_data(evaluation: ParlayEvaluation) -> ParlayEvaluationData:
                 odds_decimal=leg.odds_decimal,
                 predicted_probability=leg.predicted_probability,
                 sim_leg_key=leg.sim_leg_key,
+                player_external_id=leg.player_external_id,
+                stat_type=leg.stat_type,
+                prop_type=leg.prop_type,
             )
             for leg in evaluation.legs
         ],
@@ -53,14 +56,19 @@ def _to_evaluation_data(evaluation: ParlayEvaluation) -> ParlayEvaluationData:
 
 @router.post("/parlays/evaluate", response_model=Envelope[ParlayEvaluationData])
 async def evaluate_parlay(request: ParlayEvaluateRequest, evaluator: EvaluatorDep) -> Envelope[ParlayEvaluationData]:
-    """Evaluate a 2-6 leg team-market parlay with correlation-aware math.
+    """Evaluate a 2-6 leg parlay with correlation-aware math.
 
+    Legs are team markets (SPREAD/TOTAL/MONEYLINE) or -- since Phase 7
+    Wave 4 -- PLAYER_PROP legs carrying the ADR-029 slug identity
+    (player_external_id + stat_type; line_value for OVER/UNDER stats).
     Same-game legs use the simulation engine's joint outcome structure
-    (falling back to documented correlation priors); distinct games
-    multiply as independent. meets_threshold evaluations are persisted and
-    published to events:parlay.detected; persist=true also stores
-    below-threshold evaluations. Returns 422 for mixed-league leg sets,
-    mutually exclusive legs, or unsupported (prop) markets.
+    (falling back to documented correlation priors, e.g. when the latest
+    run captured no player distributions); distinct games multiply as
+    independent. meets_threshold evaluations are persisted and published
+    to events:parlay.detected; persist=true also stores below-threshold
+    evaluations. Returns 422 for mixed-league leg sets, mutually exclusive
+    legs, incomplete prop identities, or unsupported (team/game prop)
+    markets.
     """
     specs = [
         ParlayLegSpec(
@@ -69,6 +77,9 @@ async def evaluate_parlay(request: ParlayEvaluateRequest, evaluator: EvaluatorDe
             side=leg.side.upper(),
             line_value=leg.line_value,
             sportsbook_key=leg.sportsbook_key,
+            player_external_id=leg.player_external_id,
+            stat_type=leg.stat_type,
+            prop_type=leg.prop_type,
         )
         for leg in request.legs
     ]
