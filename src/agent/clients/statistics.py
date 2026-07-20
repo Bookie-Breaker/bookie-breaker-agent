@@ -25,6 +25,10 @@ class Game(BaseModel):
     away_team: TeamRef
     scheduled_start: str = ""
     season: int = 0
+    # Current score, populated for IN_PROGRESS (and FINAL) games; None
+    # pregame. Used to derive live simulation state (Phase 7 Wave 2).
+    home_score: int | None = None
+    away_score: int | None = None
 
 
 class StatisticsClient(ServiceClient):

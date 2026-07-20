@@ -29,6 +29,7 @@ from agent.core.analysis import AnalysisService
 from agent.core.bettor import AutoBettor
 from agent.core.dashboard import DashboardService
 from agent.core.edge_detector import EdgeDetector
+from agent.core.live import LiveDebouncer, LiveEvaluator
 from agent.core.parlay import ParlayEvaluator
 from agent.core.parlay_scanner import ParlayScanner
 from agent.core.pipeline import PipelineRunner
@@ -130,7 +131,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         summary_service = DailySummaryService(edge_repo, emulator, llm, analysis_repo)
         scheduler = PipelineScheduler(schedule_repo, runner, summary_service, settings)
         rerun = RerunCoordinator(runner, schedule_repo, settings)
-        subscriber = EventSubscriber(redis_client, edge_repo, rerun=rerun)
+        # Live re-evaluations only exist when LIVE_EDGES_ENABLED (default
+        # off), mirroring the parlay scanner wiring above.
+        live_debouncer: LiveDebouncer | None = None
+        if settings.live_edges_enabled:
+            live_evaluator = LiveEvaluator(
+                edge_repo,
+                statistics,
+                simulation,
+                prediction,
+                lines,
+                detector,
+                alert_service,
+                redis_client,
+                ttl_seconds=settings.live_edge_ttl_seconds,
+            )
+            live_debouncer = LiveDebouncer(live_evaluator, debounce_seconds=settings.live_debounce_seconds)
+        subscriber = EventSubscriber(redis_client, edge_repo, rerun=rerun, live=live_debouncer)
 
         app.state.redis = redis_client
         app.state.statistics_client = statistics
@@ -178,6 +195,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await scheduler.stop()  # stop creating runs first
             await rerun.stop()
+            if live_debouncer is not None:
+                await live_debouncer.stop()
             await subscriber.stop()
             await llm.aclose()
             await http_client.aclose()

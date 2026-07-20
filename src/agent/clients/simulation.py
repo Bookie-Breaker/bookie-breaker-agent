@@ -62,10 +62,17 @@ class SimulationClient(ServiceClient):
         game_id: str,
         config: dict[str, Any] | None = None,
         force_refresh: bool = False,
+        live_state: dict[str, Any] | None = None,
     ) -> SimulationRun:
+        """Run a simulation; live_state (Phase 7 Wave 2) pins the current
+        in-game situation: {home_score, away_score, fraction_remaining (0,1],
+        period?, clock_seconds?, bases?, outs?, half?, possession?, down?,
+        yardline?}."""
         body: dict[str, Any] = {"game_id": game_id, "force_refresh": force_refresh}
         if config:
             body["config"] = config
+        if live_state:
+            body["live_state"] = live_state
         # Retriable: simulation runs dedupe upstream on game + config
         data = await self.post_data("/api/v1/sim/simulations", f"simulation for game {game_id}", body, retriable=True)
         return SimulationRun.model_validate(data)

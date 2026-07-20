@@ -1,8 +1,9 @@
 """Background Redis pub/sub subscriber with reconnect and reactions.
 
-Reactions: staleness marking and cache invalidation (Phase 3), plus
-debounced event-triggered pipeline re-runs via the RerunCoordinator for
-lines.updated and stats.updated (Phase 4).
+Reactions: staleness marking and cache invalidation (Phase 3), debounced
+event-triggered pipeline re-runs via the RerunCoordinator for lines.updated
+and stats.updated (Phase 4), and per-game live re-evaluations via the
+LiveDebouncer for ``is_live`` lines.updated frames (Phase 7 Wave 2).
 
 The subscriber never crashes the app: connection failures trigger a capped
 exponential backoff reconnect loop, and per-message handling errors are
@@ -17,6 +18,7 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
+from agent.core.live import LiveDebouncer
 from agent.core.rerun import RerunCoordinator
 from agent.db.repository import EdgeRepository
 
@@ -39,11 +41,14 @@ class EventSubscriber:
         redis_client: "aioredis.Redis",
         edge_repo: EdgeRepository,
         rerun: RerunCoordinator | None = None,
+        live: LiveDebouncer | None = None,
         max_backoff_seconds: float = 30.0,
     ) -> None:
         self._redis = redis_client
         self._edge_repo = edge_repo
         self._rerun = rerun
+        # None when LIVE_EDGES_ENABLED is off: live frames are ignored.
+        self._live = live
         self._max_backoff = max_backoff_seconds
         self._task: asyncio.Task[None] | None = None
         self._connected = False
@@ -117,6 +122,13 @@ class EventSubscriber:
     async def _on_lines_updated(self, payload: dict[str, Any]) -> None:
         # lines.updated game_ids are lines-service external ids
         game_external_ids = [str(gid) for gid in payload.get("game_ids", [])]
+        if payload.get("is_live"):
+            # In-play frames (Phase 7 Wave 2) route ONLY to the live
+            # debouncer: sub-second bursts must not churn staleness
+            # marking, cache invalidation, or full-league re-runs. Live
+            # edges are short-lived rows re-derived on every evaluation.
+            self._request_live_evaluations(game_external_ids)
+            return
         stale = 0
         for game_external_id in game_external_ids:
             stale += await self._edge_repo.mark_stale_by_game_external(game_external_id)
@@ -124,6 +136,13 @@ class EventSubscriber:
             logger.info("marked %d edges stale after lines.updated for %d games", stale, len(game_external_ids))
         await self._invalidate_caches()
         await self._request_reruns(payload, game_external_ids)
+
+    def _request_live_evaluations(self, game_external_ids: list[str]) -> None:
+        if self._live is None:
+            logger.debug("live lines.updated ignored: live edges disabled")
+            return
+        for game_external_id in game_external_ids:
+            self._live.request(game_external_id)
 
     async def _on_stats_updated(self, payload: dict[str, Any]) -> None:
         # Injury/stat changes shift predictions; re-run affected leagues.

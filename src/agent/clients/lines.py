@@ -30,6 +30,9 @@ class LineSnapshot(BaseModel):
     implied_probability: float | None = None
     is_opening: bool = False
     is_closing: bool = False
+    # In-play line from the live provider (Phase 7 Wave 2); additive field,
+    # absent from pregame snapshots.
+    is_live: bool = False
     timestamp: str = ""
 
 
