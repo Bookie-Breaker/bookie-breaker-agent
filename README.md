@@ -1,5 +1,14 @@
 # bookie-breaker-agent
 
+[![CI](https://img.shields.io/github/actions/workflow/status/Bookie-Breaker/bookie-breaker-agent/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/Bookie-Breaker/bookie-breaker-agent/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/codecov/c/github/Bookie-Breaker/bookie-breaker-agent?logo=codecov&logoColor=white)](https://app.codecov.io/gh/Bookie-Breaker/bookie-breaker-agent)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![uv](https://img.shields.io/badge/uv-managed-DE5FE9?logo=uv&logoColor=white)
+![Anthropic](https://img.shields.io/badge/Anthropic-LLM-191919?logo=anthropic&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
+
 Central FastAPI coordinator for BookieBreaker (port 8006). Runs the prediction pipeline
 (simulation → prediction → edge_detection → bet_placement), detects +EV edges against de-vigged
 market prices, sizes stakes with fractional Kelly, and places paper bets through the
