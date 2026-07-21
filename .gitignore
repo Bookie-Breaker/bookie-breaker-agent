@@ -39,3 +39,4 @@ Thumbs.db
 
 # graphify local knowledge graph (rebuilt by dev-env-setup / post-commit hook)
 graphify-out/
+# probe: verify codecov status contexts (PR will be closed unmerged)
